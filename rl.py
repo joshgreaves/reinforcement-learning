@@ -75,6 +75,10 @@ class PolicyDataset(Dataset):
 def multinomial_likelihood(dist, idx):
     return dist[range(dist.shape[0]), idx.long()]
 
+def get_log_p(data, mu, sigma):
+    """get negative log likelihood from normal distribution"""
+    return -torch.log(torch.sqrt(2*math.pi*sigma**2)) - (data - mu)**2/(2*sigma**2)
+
 
 def ppo(env_factory, policy, value, likelihood_fn, embedding_net=None, epochs=1000, rollouts_per_epoch=100,
         max_episode_length=200, gamma=0.99, policy_epochs=5, batch_size=256, epsilon=0.2, environment_threads=1,
