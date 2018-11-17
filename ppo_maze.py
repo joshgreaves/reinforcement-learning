@@ -23,11 +23,19 @@ class MazeWorldEnvironment(RLEnvironment):
         self._res = res
         self._prev_frames = prev_frames
         self._imgs = np.zeros((res[0], res[1], prev_frames), dtype=np.float32)
+        self._interval = 2
+        self._next_interval = self._interval
 
     def step(self, action):
-        s, r, t, _ = self._env.step(action.item())
+        s, _, _, _ = self._env.step(action.item())
+
+        r = 0.0
+        if s[Sensors.LOCATION_SENSOR][0] >= self._next_interval:
+            r += 1
+            self._next_interval += self._interval
+
         self._process_state(s)
-        return self._imgs, np.array((r.item())), False
+        return self._imgs, np.array(r), False
 
     def reset(self):
         self._imgs = np.zeros((self._res[0], self._res[1], self._prev_frames), dtype=np.float32)
@@ -37,7 +45,7 @@ class MazeWorldEnvironment(RLEnvironment):
 
     def _process_state(self, s):
         self._imgs = np.roll(self._imgs, 1, axis=2)
-        self._imgs[:, :, 0] = np.mean(copy(s[Sensors.PIXEL_CAMERA][:, :, :3]).astype(np.float32) / 255, axis=2)
+        self._imgs[:, :, 0] = np.mean(copy(s[Sensors.RGB_CAMERA][:, :, :3]).astype(np.float32) / 255, axis=2)
 
 
 class ConvNetwork(nn.Module):
@@ -56,6 +64,7 @@ class ConvNetwork(nn.Module):
             nn.Conv2d(128, 128, 3, padding=1),  # -> [n, 128, 32, 32]
             nn.ReLU(),
             nn.Conv2d(128, 256, 2, stride=2),  # -> [n, 256, 16, 16]
+            nn.ReLU(),
         )
 
     def forward(self, x):
@@ -117,9 +126,9 @@ def main():
     conv = ConvNetwork()
     policy = PolicyNetwork()
     value = ValueNetwork()
-    ppo(factory, policy, value, multinomial_likelihood, embedding_net=conv, epochs=1000, rollouts_per_epoch=10,
+    ppo(factory, policy, value, multinomial_likelihood, embedding_net=conv, epochs=1000, rollouts_per_epoch=50,
         max_episode_length=300, gamma=0.999, policy_epochs=5, batch_size=256, epsilon=0.2, environment_threads=10,
-        device=torch.device('cuda'), lr=1e-3, weight_decay=0.01)
+        device=torch.device('cuda'), lr=1e-3, weight_decay=0.01, gif_epochs=5)
 
 
 if __name__ == '__main__':
