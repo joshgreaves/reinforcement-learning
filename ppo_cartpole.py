@@ -1,7 +1,7 @@
 import gym
 import numpy as np
 import torch
-import torch.nn as nn
+from torch import nn
 
 from rl import *
 
@@ -33,6 +33,7 @@ class CartPoleEnvironment(RLEnvironment):
 
 class CartPolePolicyNetwork(nn.Module):
     """Policy Network for CartPole."""
+
     def __init__(self, state_dim=4, action_dim=2):
         super(CartPolePolicyNetwork, self).__init__()
         self._net = nn.Sequential(
@@ -69,6 +70,7 @@ class CartPolePolicyNetwork(nn.Module):
 
 class CartPoleValueNetwork(nn.Module):
     """Approximates the value of a particular CartPole state."""
+
     def __init__(self, state_dim=4):
         super(CartPoleValueNetwork, self).__init__()
         self._net = nn.Sequential(
@@ -98,4 +100,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-

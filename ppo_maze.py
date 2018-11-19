@@ -23,7 +23,7 @@ class MazeWorldEnvironment(RLEnvironment):
         self._res = res
         self._prev_frames = prev_frames
         self._imgs = np.zeros((res[0], res[1], prev_frames), dtype=np.float32)
-        self._interval = 2
+        self._interval = 1.0
         self._next_interval = self._interval
 
     def step(self, action):
@@ -35,12 +35,13 @@ class MazeWorldEnvironment(RLEnvironment):
             self._next_interval += self._interval
 
         self._process_state(s)
-        return self._imgs, np.array(r), False
+        return self._imgs, r, False
 
     def reset(self):
         self._imgs = np.zeros((self._res[0], self._res[1], self._prev_frames), dtype=np.float32)
         s, _, _, _ = self._env.reset()
         self._process_state(s)
+        self._next_interval = self._interval
         return self._imgs
 
     def _process_state(self, s):
@@ -126,9 +127,9 @@ def main():
     conv = ConvNetwork()
     policy = PolicyNetwork()
     value = ValueNetwork()
-    ppo(factory, policy, value, multinomial_likelihood, embedding_net=conv, epochs=1000, rollouts_per_epoch=50,
-        max_episode_length=300, gamma=0.999, policy_epochs=5, batch_size=256, epsilon=0.2, environment_threads=10,
-        device=torch.device('cuda'), lr=1e-3, weight_decay=0.01, gif_epochs=5)
+    ppo(factory, policy, value, multinomial_likelihood, embedding_net=conv, epochs=1000, rollouts_per_epoch=10,
+        max_episode_length=450, gamma=0.999, policy_epochs=4, batch_size=256, epsilon=0.2, environment_threads=10,
+        data_loader_threads=10, device=torch.device('cuda'), lr=1e-3, weight_decay=0.01, gif_epochs=5)
 
 
 if __name__ == '__main__':
