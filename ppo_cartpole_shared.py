@@ -4,36 +4,13 @@ import torch
 import torch.nn as nn
 
 from rl import *
-
-
-class CartPoleEnvironmentFactory(EnvironmentFactory):
-    def __init__(self):
-        super(CartPoleEnvironmentFactory, self).__init__()
-
-    def new(self):
-        return CartPoleEnvironment()
-
-
-class CartPoleEnvironment(RLEnvironment):
-    def __init__(self):
-        super(CartPoleEnvironment, self).__init__()
-        self._env = gym.make('CartPole-v0')
-
-    def step(self, action):
-        """action is type np.ndarray of shape [1] and type np.uint8.
-        Returns observation (np.ndarray), r (float), t (boolean)
-        """
-        s, r, t, _ = self._env.step(action.item())
-        return s, r, t
-
-    def reset(self):
-        """Returns observation (np.ndarray)"""
-        return self._env.reset()
+from environments import CartPoleEnvironmentFactory
 
 
 class CartPolePolicyNetwork(nn.Module):
     """Policy Network for CartPole."""
-    def __init__(self, state_dim=4, action_dim=2):
+
+    def __init__(self, action_dim=2):
         super(CartPolePolicyNetwork, self).__init__()
         self._net = nn.Sequential(
             nn.Linear(100, 10),
@@ -65,6 +42,7 @@ class CartPolePolicyNetwork(nn.Module):
 
 class CartPoleValueNetwork(nn.Module):
     """Approximates the value of a particular CartPole state."""
+
     def __init__(self, state_dim=4):
         super(CartPoleValueNetwork, self).__init__()
         self._net = nn.Sequential(
@@ -85,10 +63,9 @@ def main():
     policy = CartPolePolicyNetwork()
     embedding = nn.Sequential(nn.Linear(4, 100), nn.ReLU(), nn.Linear(100, 100), nn.ReLU())
     value = CartPoleValueNetwork()
-    ppo(factory, policy, value, multinomial_likelihood, embedding_net=embedding, epochs=1000, rollouts_per_epoch=100, max_episode_length=200,
-        gamma=0.99, policy_epochs=5, batch_size=256)
+    ppo(factory, policy, value, multinomial_likelihood, embedding_net=embedding, epochs=1000, rollouts_per_epoch=100,
+        max_episode_length=200, gamma=0.99, policy_epochs=5, batch_size=256, experiment_name='cartpole_shared')
 
 
 if __name__ == '__main__':
     main()
-
