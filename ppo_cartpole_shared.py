@@ -1,7 +1,7 @@
 import gym
 import numpy as np
 import torch
-from torch import nn
+import torch.nn as nn
 
 from rl import *
 
@@ -33,15 +33,10 @@ class CartPoleEnvironment(RLEnvironment):
 
 class CartPolePolicyNetwork(nn.Module):
     """Policy Network for CartPole."""
-
     def __init__(self, state_dim=4, action_dim=2):
         super(CartPolePolicyNetwork, self).__init__()
         self._net = nn.Sequential(
-            nn.Linear(state_dim, 10),
-            nn.ReLU(),
-            nn.Linear(10, 10),
-            nn.ReLU(),
-            nn.Linear(10, 10),
+            nn.Linear(100, 10),
             nn.ReLU(),
             nn.Linear(10, action_dim)
         )
@@ -70,15 +65,10 @@ class CartPolePolicyNetwork(nn.Module):
 
 class CartPoleValueNetwork(nn.Module):
     """Approximates the value of a particular CartPole state."""
-
     def __init__(self, state_dim=4):
         super(CartPoleValueNetwork, self).__init__()
         self._net = nn.Sequential(
-            nn.Linear(state_dim, 10),
-            nn.ReLU(),
-            nn.Linear(10, 10),
-            nn.ReLU(),
-            nn.Linear(10, 10),
+            nn.Linear(100, 10),
             nn.ReLU(),
             nn.Linear(10, 1)
         )
@@ -93,10 +83,12 @@ class CartPoleValueNetwork(nn.Module):
 def main():
     factory = CartPoleEnvironmentFactory()
     policy = CartPolePolicyNetwork()
+    embedding = nn.Sequential(nn.Linear(4, 100), nn.ReLU(), nn.Linear(100, 100), nn.ReLU())
     value = CartPoleValueNetwork()
-    ppo(factory, policy, value, multinomial_likelihood, epochs=1000, rollouts_per_epoch=100, max_episode_length=200,
-        gamma=0.99, policy_epochs=5, batch_size=256, experiment_name='cartpole_basic')
+    ppo(factory, policy, value, multinomial_likelihood, embedding_net=embedding, epochs=1000, rollouts_per_epoch=100, max_episode_length=200,
+        gamma=0.99, policy_epochs=5, batch_size=256)
 
 
 if __name__ == '__main__':
     main()
+

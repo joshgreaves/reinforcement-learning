@@ -2,3 +2,7 @@
 __pycache__
 core
 *.swp
+experiments
+scenarios
+holodeck
+

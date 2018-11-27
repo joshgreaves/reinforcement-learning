@@ -129,7 +129,8 @@ def main():
     value = ValueNetwork()
     ppo(factory, policy, value, multinomial_likelihood, embedding_net=conv, epochs=1000, rollouts_per_epoch=10,
         max_episode_length=450, gamma=0.999, policy_epochs=4, batch_size=256, epsilon=0.2, environment_threads=10,
-        data_loader_threads=10, device=torch.device('cuda'), lr=1e-3, weight_decay=0.01, gif_epochs=5)
+        data_loader_threads=10, device=torch.device('cuda'), lr=1e-3, weight_decay=0.01, gif_epochs=5,
+        experiment_name='holodeck_maze_basic')
 
 
 if __name__ == '__main__':

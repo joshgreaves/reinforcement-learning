@@ -8,6 +8,7 @@ import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 from tqdm import tqdm
 import numpy as np
+import os
 from queue import Queue
 
 
@@ -64,10 +65,21 @@ def get_log_p(data, mu, sigma):
     return -torch.log(torch.sqrt(2 * math.pi * sigma ** 2)) - (data - mu) ** 2 / (2 * sigma ** 2)
 
 
-def ppo(env_factory, policy, value, likelihood_fn, embedding_net=None, epochs=1000, rollouts_per_epoch=100,
-        max_episode_length=200, gamma=0.99, policy_epochs=5, batch_size=256, epsilon=0.2, environment_threads=1,
-        data_loader_threads=1, device=torch.device('cpu'), lr=1e-3, betas=(0.9, 0.999), weight_decay=0.01, gif_name='',
-        gif_epochs=0, csv_file='latest_run.csv'):
+def ppo(env_factory, policy, value, likelihood_fn, embedding_net=None, epochs=1000,
+        rollouts_per_epoch=100, max_episode_length=200, gamma=0.99, policy_epochs=5, batch_size=256, epsilon=0.2,
+        environment_threads=1, data_loader_threads=1, device=torch.device('cpu'), lr=1e-3, betas=(0.9, 0.999),
+        weight_decay=0.01, gif_name='', gif_epochs=0, experiment_name='project', csv_file='latest_run.csv'):
+    # Check everything is in the correct format
+    assert(isinstance(env_factory, EnvironmentFactory))
+
+    # Set up experiment details
+    experiment_path = os.path.join('experiments', experiment_name)
+    os.makedirs(experiment_path)
+    if gif_epochs:
+        gif_path = os.path.join(experiment_path, 'gifs')
+        os.mkdir(gif_path)
+    csv_file = os.path.join(experiment_path, csv_file)
+
     # Clear the csv file
     with open(csv_file, 'w') as f:
         f.write('avg_reward, value_loss, policy_loss')
@@ -119,11 +131,11 @@ def ppo(env_factory, policy, value, likelihood_fn, embedding_net=None, epochs=10
         # Collect the experience
         rollouts = list(experience_queue.queue)
         avg_r = sum(reward_queue.queue) / reward_queue.qsize()
-        loop.set_description('avg reward: % 6.2f' % (avg_r))
+        loop.set_description('avg reward: % 6.2f' % avg_r)
 
         # Make gifs
         if gif_epochs and e % gif_epochs == 0:
-            _make_gif(rollouts[0], gif_name + '%d.gif' % e)
+            _make_gif(rollouts[0], os.path.join(gif_path, gif_name + '%d.gif' % e))
 
         # Update the policy
         experience_dataset = ExperienceDataset(rollouts)

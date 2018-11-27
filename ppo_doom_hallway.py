@@ -31,6 +31,7 @@ class DoomEnvironment(RLEnvironment):
         self._game.set_doom_skill(5)
 
         self._game.add_available_button(vzd.Button.ATTACK)
+        self._game.add_available_button(vzd.Button.MOVE_FORWARD)
         self._game.add_available_button(vzd.Button.MOVE_LEFT)
         self._game.add_available_button(vzd.Button.MOVE_RIGHT)
         self._game.add_available_button(vzd.Button.TURN_LEFT)
@@ -38,21 +39,23 @@ class DoomEnvironment(RLEnvironment):
 
         self._game.set_episode_timeout(3000)
         self._game.set_episode_start_time(10)
-        self._game.set_window_visible(True)
+        self._game.set_window_visible(False)
 
         self._game.init()
         self._actions = [
-            [True, False, False, False, False],
-            [False, True, False, False, False],
-            [False, False, True, False, False],
-            [False, False, False, True, False],
-            [False, False, False, False, True]
+            [True, False, False, False, False, False],
+            [False, True, False, False, False, False],
+            [False, False, True, False, False, False],
+            [False, False, False, True, False, False],
+            [False, False, False, False, True, False],
+            [False, False, False, False, False, True],
         ]
 
     def step(self, action):
         action = action.item()
         r = self._game.make_action(self._actions[action], self._skiprate)
-        r = float(max(min(r, 1.0), -1.0))  # Clamp r to between -1 and 1
+        # r = float(max(min(r, 1.0), -1.0))  # Clamp r to between -1 and 1
+        r = float(r)
 
         t = self._game.is_episode_finished()
 
@@ -105,7 +108,7 @@ class ConvNetwork(nn.Module):
 
 
 class PolicyNetwork(nn.Module):
-    def __init__(self, action_dim=5, hidden_dim=100):
+    def __init__(self, action_dim=6, hidden_dim=100):
         super(PolicyNetwork, self).__init__()
         self._fc = nn.Sequential(
             nn.Linear(256 * 15 * 20, hidden_dim),
@@ -129,9 +132,16 @@ class PolicyNetwork(nn.Module):
         actions = np.empty((batch_size, 1), dtype=np.uint8)
         probs_np = probs.cpu().detach().numpy()
         for i in range(batch_size):
-            action_one_hot = np.random.multinomial(1, probs_np[i])
-            action_idx = np.argmax(action_one_hot)
-            actions[i, 0] = action_idx
+            done = False
+            while not done:
+                try:
+                    action_one_hot = np.random.multinomial(1, probs_np[i])
+                    action_idx = np.argmax(action_one_hot)
+                    actions[i, 0] = action_idx
+                    done = True
+                except ValueError:
+                    print('value error', probs_np[i], np.sum(probs_np[i]))
+                    probs_np[i] /= np.sum(probs_np[i])
         return probs, actions
 
 
@@ -157,8 +167,8 @@ def main():
     conv = ConvNetwork()
     policy = PolicyNetwork()
     value = ValueNetwork()
-    ppo(factory, policy, value, multinomial_likelihood, embedding_net=conv, epochs=1000, rollouts_per_epoch=200,
-        max_episode_length=3000, gamma=0.999, policy_epochs=1, batch_size=256, epsilon=0.2, environment_threads=5,
+    ppo(factory, policy, value, multinomial_likelihood, embedding_net=conv, epochs=1000, rollouts_per_epoch=500,
+        max_episode_length=3000, gamma=0.999, policy_epochs=4, batch_size=256, epsilon=0.2, environment_threads=5,
         data_loader_threads=10, device=torch.device('cuda'), lr=1e-3, weight_decay=0.0, gif_epochs=5)
 
 
