@@ -1,7 +1,9 @@
 .idea
+*.swp
+_vizdoom.ini
+
 __pycache__
 core
-*.swp
 experiments
 scenarios
 holodeck

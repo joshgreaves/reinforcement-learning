@@ -74,10 +74,12 @@ def ppo(env_factory, policy, value, likelihood_fn, embedding_net=None, epochs=10
 
     # Set up experiment details
     experiment_path = os.path.join('experiments', experiment_name)
-    os.makedirs(experiment_path)
+    if not os.path.isdir(experiment_path):
+        os.makedirs(experiment_path)
     if gif_epochs:
         gif_path = os.path.join(experiment_path, 'gifs')
-        os.mkdir(gif_path)
+        if not os.path.isdir(gif_path):
+            os.mkdir(gif_path)
     csv_file = os.path.join(experiment_path, csv_file)
 
     # Clear the csv file
