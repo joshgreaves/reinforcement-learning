@@ -22,22 +22,20 @@ class FourLayerMlp(nn.Module):
         return self._net(x)
 
 
-class DiscreteActionSpaceNetwork(nn.Module):
-    def __init__(self, net):
-        super(DiscreteActionSpaceNetwork, self).__init__()
-        self._net = net
+class MultinomialNetwork(nn.Module):
+    def __init__(self):
+        super(MultinomialNetwork, self).__init__()
         self._softmax = nn.Softmax(dim=1)
 
-    def forward(self, x, get_action=True):
+    def forward(self, x):
         """Receives input x of shape [batch, state_dim].
         Outputs action distribution (categorical distribution) of shape [batch, action_dim],
         as well as a sampled action (optional).
         """
-        scores = self._net(x)
-        probs = self._softmax(scores)
+        return self._softmax(x)
 
         if not get_action:
-            return probs
+            return extra_info
 
         batch_size = x.shape[0]
         actions = np.empty((batch_size, 1), dtype=np.uint8)
@@ -46,7 +44,7 @@ class DiscreteActionSpaceNetwork(nn.Module):
             action_one_hot = np.random.multinomial(1, probs_np[i])
             action_idx = np.argmax(action_one_hot)
             actions[i, 0] = action_idx
-        return probs, actions
+        return actions, extra_info
 
 
 class ConvNetwork128(nn.Module):
@@ -84,3 +82,18 @@ class ConvNetwork128(nn.Module):
 
     def get_output_dim(self):
         return 256 * self._output_height * self._output_width
+
+
+class EpsilonGreedy(nn.Module):
+    def __init__(self, epsilon):
+        super(EpsilonGreedy, self).__init__()
+        self.epsilon = epsilon
+
+    def forward(self, x):
+        if random() < epsilon:
+            # return a random choice
+            return x
+        else:
+            # return the greedy choice
+            return x
+
