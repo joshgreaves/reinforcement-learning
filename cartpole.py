@@ -21,9 +21,9 @@ def train_dqn():
     factory = CartPoleEnvironmentFactory()
     action_value_network = nets.FourLayerMlp(4, 2, hidden_dim=10)
 
-    # dqn = rl.DQN(factory, action_value_network)
-    # dqn.train(100)
+    dqn = rl.DQN(factory, action_value_network)
+    dqn.train(100)
 
 
 if __name__ == '__main__':
-    train_ppo()
+    train_dqn()

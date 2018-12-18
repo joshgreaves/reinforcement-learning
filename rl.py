@@ -1,3 +1,4 @@
+from collections import deque
 from copy import deepcopy
 import imageio
 from itertools import chain
@@ -8,6 +9,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 from tqdm import tqdm
+import matplotlib.pyplot as plt
 import numpy as np
 import os
 from queue import Queue
@@ -22,7 +24,7 @@ class RLEnvironment(object):
 
     def step(self, x):
         """Takes an action x, which is the same format as the output from a policy network.
-        Returns observation (np.ndarray), reward (float), terminal (boolean)
+        Returns observation (np.ndarray), reward (float), terminal (boolean), and info (dict)
         """
         raise NotImplementedError()
 
@@ -47,8 +49,11 @@ class ExperienceDataset(Dataset):
     def __init__(self, experience, keys):
         super(ExperienceDataset, self).__init__()
         self._exp = []
-        for x in experience:
-            self._exp.extend(x)
+        if isinstance(experience[0], list):
+            for x in experience:
+                self._exp.extend(x)
+        else:
+            self._exp = experience
         self._length = len(self._exp)
         self._keys = keys
 
@@ -61,13 +66,14 @@ class ExperienceDataset(Dataset):
 
 
 class RlAlgorithm(object):
-    def __init__(self, env_factory, experiment_name='project', gif_epochs=0, csv_file='latest_run.csv'):
+    def __init__(self, env_factory, experiment_name='project', gif_epochs=0, csv_file='latest_run.csv',
+                 headers=('avg_reward', 'avg_loss')):
         assert (isinstance(env_factory, EnvironmentFactory))
         self._env_factory = env_factory
 
         self._experiment_name = experiment_name
         self._gif_epochs = gif_epochs
-        self._gif_path, self._csv_file = self._prepare_experiment(experiment_name, gif_epochs, csv_file)
+        self._gif_path, self._csv_file = self._prepare_experiment(experiment_name, gif_epochs, csv_file, headers)
 
     def train(self, epochs, rollouts_per_epoch=100, max_episode_length=200,
               policy_epochs=5, batch_size=256, environment_threads=1, data_loader_threads=1,
@@ -75,7 +81,7 @@ class RlAlgorithm(object):
         raise NotImplementedError()
 
     @staticmethod
-    def _prepare_experiment(experiment_name, gif_epochs, csv_file):
+    def _prepare_experiment(experiment_name, gif_epochs, csv_file, headers):
         experiment_path = os.path.join('experiments', experiment_name)
         if not os.path.isdir(experiment_path):
             os.makedirs(experiment_path)
@@ -88,7 +94,7 @@ class RlAlgorithm(object):
 
         # Clear the csv file
         with open(csv_file, 'w') as f:
-            f.write('avg_reward, value_loss, policy_loss')
+            f.write(', '.join(headers) + '\n')
         return gif_path, csv_file
 
 
@@ -118,7 +124,7 @@ def get_epsilon_greedy_selection(epsilon):
         actions = np.empty((batch_size, 1), dtype=np.uint8)
         values_np = values.cpu().detach().numpy()
         for i in range(batch_size):
-            if random.random() < epsilon:
+            if random.random() > epsilon:
                 actions[i] = np.argmax(values_np[i])
             else:
                 actions[i, 0] = random.randint(0, num_actions - 1)
@@ -127,124 +133,118 @@ def get_epsilon_greedy_selection(epsilon):
     return epsilon_greedy_selection
 
 
-# class DQN(RlAlgorithm):
-#     def __init__(self, env_factory, action_value_network, device=torch.device('cpu'),
-#                  gamma=0.99, lr=1e-3, betas=(0.9, 0.999),
-#                  weight_decay=0.01, experiment_name='project',
-#                  gif_epochs=0, csv_file='latest_run.csv',
-#                  epsilon_start=0.95, epsilon_end=0.1, epsilon_decay_epochs=100):
-#         super(DQN, self).__init__(env_factory, experiment_name, gif_epochs, csv_file)
-#
-#         self._target_network = deepcopy(action_value_network).to(device)
-#         self._learning_network = action_value_network.to(device)
-#
-#         self._params = chain(self._learning_network.parameters(), self._target_network.parameters())
-#         self._optimizer = optim.Adam(self._params, lr=lr, betas=betas, weight_decay=weight_decay)
-#         self._value_criteria = nn.MSELoss()
-#
-#         self._gamma = gamma
-#         self._epsilon_start = epsilon_start
-#         self._epsilon_end = epsilon_end
-#         self._epsilon_decay_epochs = epsilon_decay_epochs
-#         self._epsilon = self._epsilon_start
-#         self._device = device
-#
-#     def train(self, epochs, rollouts_per_epoch=100, max_episode_length=200,
-#               policy_epochs=5, batch_size=256, environment_threads=1, data_loader_threads=1,
-#               gif_name=''):
-#         loop = tqdm(total=epochs, position=0, leave=False)
-#
-#         # Prepare the environments
-#         environments = [self._env_factory.new() for _ in range(environment_threads)]
-#         rollouts_per_thread = rollouts_per_epoch // environment_threads
-#         remainder = rollouts_per_epoch % environment_threads
-#         rollout_nums = ([rollouts_per_thread + 1] * remainder) + (
-#                     [rollouts_per_thread] * (environment_threads - remainder))
-#
-#         for e in range(epochs):
-#             # Run the environments
-#             experience_queue = Queue()
-#             reward_queue = Queue()
-#             threads = [Thread(target=_run_envs, args=(environments[i],
-#                                                       None,
-#                                                       self._learning_network,
-#                                                       get_epsilon_greedy_selection(self._epsilon),
-#                                                       experience_queue,
-#                                                       reward_queue,
-#                                                       rollout_nums[i],
-#                                                       max_episode_length,
-#                                                       self._gamma,
-#                                                       self._device)) for i in range(environment_threads)]
-#             for x in threads:
-#                 x.start()
-#             for x in threads:
-#                 x.join()
-#
-#             # Collect the experience
-#             rollouts = list(experience_queue.queue)
-#             avg_r = sum(reward_queue.queue) / reward_queue.qsize()
-#             loop.set_description('avg reward: % 6.2f' % avg_r)
-#
-#             # Make gifs
-#             if self._gif_epochs and e % self._gif_epochs == 0:
-#                 _make_gif(rollouts[0], os.path.join(gif_path, gif_name + '%d.gif' % e))
-#
-#             experience_dataset = ExperienceDataset(rollouts)
-#             data_loader = DataLoader(experience_dataset, num_workers=data_loader_threads, batch_size=batch_size,
-#                                      shuffle=True,
-#                                      pin_memory=True)
-#             avg_policy_loss = 0
-#             avg_val_loss = 0
-#             for _ in range(policy_epochs):
-#                 avg_policy_loss = 0
-#                 avg_val_loss = 0
-#                 for state, old_action_dist, old_action, reward, ret in data_loader:
-#                     state = _prepare_tensor_batch(state, self._device)
-#                     old_action_dist = _prepare_tensor_batch(old_action_dist, self._device)
-#                     old_action = _prepare_tensor_batch(old_action, self._device)
-#                     ret = _prepare_tensor_batch(ret, self._device).unsqueeze(1)
-#
-#                     self._optimizer.zero_grad()
-#
-#                     # If there is an embedding net, carry out the embedding
-#                     if self._embedding_network:
-#                         state = self._embedding_network(state)
-#
-#                     # Calculate the ratio term
-#                     current_action_dist = self._policy_network(state, False)
-#                     current_likelihood = self._likelihood_fn(current_action_dist, old_action)
-#                     old_likelihood = self._likelihood_fn(old_action_dist, old_action)
-#                     ratio = (current_likelihood / old_likelihood)
-#
-#                     # Calculate the value loss
-#                     expected_returns = self._value_network(state)
-#                     val_loss = self._value_criteria(expected_returns, ret)
-#
-#                     # Calculate the policy loss
-#                     advantage = ret - expected_returns.detach()
-#                     lhs = ratio * advantage
-#                     rhs = torch.clamp(ratio, self._ppo_lower_bound, self._ppo_upper_bound) * advantage
-#                     policy_loss = -torch.mean(torch.min(lhs, rhs))
-#
-#                     # For logging
-#                     avg_val_loss += val_loss.item()
-#                     avg_policy_loss += policy_loss.item()
-#
-#                     # Backpropagate
-#                     loss = policy_loss + val_loss
-#                     loss.backward()
-#                     self._optimizer.step()
-#
-#                 # Log info
-#                 avg_val_loss /= len(data_loader)
-#                 avg_policy_loss /= len(data_loader)
-#                 loop.set_description(
-#                     'avg reward: % 6.2f, value loss: % 6.2f, policy loss: % 6.2f' % (
-#                     avg_r, avg_val_loss, avg_policy_loss))
-#             with open(self._csv_file, 'a+') as f:
-#                 f.write('%6.2f, %6.2f, %6.2f\n' % (avg_r, avg_val_loss, avg_policy_loss))
-#             print()
-#             loop.update(1)
+class DQN(RlAlgorithm):
+    def __init__(self, env_factory, action_value_network, device=torch.device('cpu'),
+                 gamma=0.99, lr=1e-3, betas=(0.9, 0.999),
+                 weight_decay=0.01, experiment_name='project',
+                 gif_epochs=0, csv_file='latest_run.csv',
+                 epsilon_start=0.95, epsilon_end=0.1, epsilon_decay_epochs=100,
+                 exp_replay_size=1000000, target_network_copy_epochs=5):
+        super(DQN, self).__init__(env_factory, experiment_name, gif_epochs, csv_file)
+
+        self._target_network = None
+        self._learning_network = action_value_network.to(device)
+
+        self._params = self._learning_network.parameters()
+        self._optimizer = optim.Adam(self._params, lr=lr, betas=betas, weight_decay=weight_decay)
+        self._criteria = nn.MSELoss()
+
+        self._gamma = gamma
+        self._epsilon_start = epsilon_start
+        self._epsilon_end = epsilon_end
+        self._epsilon_decay_epochs = epsilon_decay_epochs
+        self._epsilon = self._epsilon_start
+        self._device = device
+
+        self._exp_replay = deque(maxlen=exp_replay_size)
+        self._target_network_copy_epochs = target_network_copy_epochs
+
+    def train(self, epochs, rollouts_per_epoch=1000, max_episode_length=200,
+              policy_epochs=1, batch_size=256, environment_threads=1, data_loader_threads=1,
+              gif_name=''):
+        loop = tqdm(total=epochs, position=0, leave=False)
+
+        # Prepare the environments
+        environments = [self._env_factory.new() for _ in range(environment_threads)]
+        rollouts_per_thread = rollouts_per_epoch // environment_threads
+        remainder = rollouts_per_epoch % environment_threads
+        rollout_nums = ([rollouts_per_thread + 1] * remainder) + (
+                [rollouts_per_thread] * (environment_threads - remainder))
+
+        for e in range(epochs):
+            if e % self._target_network_copy_epochs == 0:
+                self._copy_target_network()
+            percentage = min(1.0, e / self._epsilon_decay_epochs)
+            self._epsilon = percentage * self._epsilon_end + (1 - percentage) * self._epsilon_start
+
+            # Run the environments
+            experience_queue = Queue()
+            reward_queue = Queue()
+            threads = [Thread(target=_run_envs, args=(environments[i],
+                                                      None,
+                                                      self._learning_network,
+                                                      get_epsilon_greedy_selection(
+                                                          self._epsilon + (random.random() / 10) - 0.05),
+                                                      experience_queue,
+                                                      reward_queue,
+                                                      rollout_nums[i],
+                                                      max_episode_length,
+                                                      self._gamma,
+                                                      self._device)) for i in range(environment_threads)]
+            for x in threads:
+                x.start()
+            for x in threads:
+                x.join()
+
+            # Collect the experience
+            rollouts = list(experience_queue.queue)
+            self._exp_replay.extend(_prepare_dqn_dataset(rollouts))
+            avg_r = sum(reward_queue.queue) / reward_queue.qsize()
+            loop.set_description('epsilon: % .2f, avg reward: % 6.2f' % (self._epsilon, avg_r))
+
+            # Make gifs
+            if self._gif_epochs and e % self._gif_epochs == 0:
+                _make_gif(rollouts[0], os.path.join(self._gif_path, gif_name + '%d.gif' % e))
+
+            experience_dataset = ExperienceDataset(list(self._exp_replay), ('s', 'a', 'r', 's_prime', 't'))
+            data_loader = DataLoader(experience_dataset, num_workers=data_loader_threads, batch_size=batch_size,
+                                     shuffle=True,
+                                     pin_memory=True)
+            avg_loss = 0
+            for _ in range(policy_epochs):
+                avg_loss = 0
+                for s, a, r, s_prime, t in data_loader:
+                    s = _prepare_tensor_batch(s, self._device)
+                    a = _prepare_tensor_batch(a, self._device).long().squeeze(1)
+                    r = _prepare_tensor_batch(r, self._device).unsqueeze(1)
+                    s_prime = _prepare_tensor_batch(s_prime, self._device)
+                    t = _prepare_tensor_batch(t, self._device).unsqueeze(1)
+
+                    self._optimizer.zero_grad()
+
+                    max_val, _ = torch.max(self._target_network(s_prime), dim=1, keepdim=True)
+                    target = r + (self._gamma * max_val * (1 - t))
+                    estimated_value = self._learning_network(s)[range(s.shape[0]), a].unsqueeze(1)
+
+                    loss = self._criteria(estimated_value, target.detach())
+                    avg_loss += loss.item()
+
+                    loss.backward()
+                    self._optimizer.step()
+
+                # Log info
+                avg_loss /= len(data_loader)
+                loop.set_description(
+                    'epsilon: % .2f, avg reward: % 6.2f, loss: % 6.2f' % (self._epsilon, avg_r, avg_loss))
+            with open(self._csv_file, 'a+') as f:
+                f.write('%6.2f, %6.2f\n' % (avg_r, avg_loss))
+            print()
+            loop.update(1)
+
+    def _copy_target_network(self):
+        self._target_network = deepcopy(self._learning_network).to(self._device)
+        for param in self._target_network.parameters():
+            param.requires_grad = False
 
 
 class PPO(RlAlgorithm):
@@ -256,8 +256,8 @@ class PPO(RlAlgorithm):
                  embedding_network=None, device=torch.device('cpu'), epsilon=0.2, gamma=0.99, lr=1e-3,
                  betas=(0.9, 0.999), weight_decay=0.01, experiment_name='project', gif_epochs=0,
                  csv_file='latest_run.csv'):
-        super(PPO, self).__init__(env_factory, experiment_name, gif_epochs, csv_file)
-
+        super(PPO, self).__init__(env_factory, experiment_name, gif_epochs, csv_file,
+                                  ('avg_reward', 'value_loss', 'policy_loss'))
         self._policy_network = policy_network.to(device)
         self._value_network = value_network.to(device)
 
@@ -312,6 +312,8 @@ class PPO(RlAlgorithm):
             rollouts = list(experience_queue.queue)
             avg_r = sum(reward_queue.queue) / reward_queue.qsize()
             loop.set_description('avg reward: % 6.2f' % avg_r)
+
+            # _calculate_entropies(rollouts)
 
             # Make gifs
             if self._gif_epochs and e % self._gif_epochs == 0:
@@ -398,7 +400,7 @@ def _run_envs(env, embedding_net, policy, action_selection_fn, experience_queue,
 
             action_data = policy(input_state)
             action = action_selection_fn(action_data)[0]  # Remove the batch dimension
-            s_prime, r, t = env.step(action)
+            s_prime, r, t, info = env.step(action)
 
             current_exp = {
                 'state': s,
@@ -407,11 +409,13 @@ def _run_envs(env, embedding_net, policy, action_selection_fn, experience_queue,
                 'reward': r,
                 'terminal': t
             }
-            current_rollout.append(current_exp)
+            current_rollout.append({**current_exp, **info})
             episode_reward += r
             if t:
                 break
             s = s_prime
+
+        current_rollout[-1]['terminal'] = True
 
         if calculate_returns:
             _calculate_returns(current_rollout, gamma)
@@ -419,18 +423,48 @@ def _run_envs(env, embedding_net, policy, action_selection_fn, experience_queue,
         reward_queue.put(episode_reward)
 
 
-# def _prepare_dqn_dataset(rollouts):
-#     for rollout in rollouts:
-#         for i in range(len(rollout) - 1):
-#             current_exp = rollout[i]
-#             next_exp = rollout[i + 1]
-#             exp = {
-#                 's' = current_exp['state']
-#             'a' = current_exp['action']
-#             'r' = current_exp['reward']
-#             's_prime' = next_exp['state']
-#             't' = next_exp['terminal']
-#             }
+def _prepare_dqn_dataset(rollouts):
+    data = []
+    for rollout in rollouts:
+        for i in range(len(rollout)):
+            current_exp = rollout[i]
+            exp = dict()
+            exp['s'] = current_exp['state']
+            exp['a'] = current_exp['action']
+            exp['r'] = current_exp['reward']
+            exp['t'] = current_exp['terminal']
+            if current_exp['terminal']:
+                exp['s_prime'] = current_exp['state']  # This doesn't matter
+            else:
+                exp['s_prime'] = rollout[i + 1]['state']
+            data.append(exp)
+    return data
+
+
+def _calculate_entropy(np_array):
+    log_prob = np.log(np_array)
+    return -np.sum(log_prob * np_array)
+
+
+def _calculate_entropies(rollouts):
+    pos_entropy = dict()
+    for rollout in rollouts:
+        for exp in rollout:
+            current_location = exp['location']
+            if current_location not in pos_entropy:
+                pos_entropy[current_location] = list()
+            # print(current_location, exp['action_data'], _calculate_entropy(exp['action_data']))
+            pos_entropy[current_location].append(_calculate_entropy(exp['action_data']))
+
+    result = np.zeros((40, 40), dtype=np.float32)
+    for k in pos_entropy.keys():
+        x, y = k
+        if -20 < x < 20 and -20 < y < 20:
+            entropy_list = pos_entropy[k]
+            result[20 - x, 20 + y] = sum(entropy_list) / len(entropy_list)
+    plt.imshow(result, vmin=0, vmax=1.5, extent=[-20, 20, -20, 20])
+    plt.show()
+
 
 def _prepare_numpy(ndarray, device):
     return torch.from_numpy(ndarray).float().unsqueeze(0).to(device)
