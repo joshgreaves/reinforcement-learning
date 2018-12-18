@@ -378,6 +378,138 @@ class PPO(RlAlgorithm):
             loop.update(1)
 
 
+class POPO(RlAlgorithm):
+    _action_type = {
+        'multinomial': (multinomial_selection, multinomial_likelihood),
+    }
+
+    def __init__(self, env_factory, policy_network, value_network, action_selection='multinomial',
+                 embedding_network=None, device=torch.device('cpu'), epsilon=0.2, gamma=0.99, lr=1e-3,
+                 betas=(0.9, 0.999), weight_decay=0.01, experiment_name='project', gif_epochs=0,
+                 csv_file='latest_run.csv', exp_replay_size=125000):
+        super(POPO, self).__init__(env_factory, experiment_name, gif_epochs, csv_file,
+                                  ('avg_reward', 'value_loss', 'policy_loss'))
+        self._policy_network = policy_network.to(device)
+        self._value_network = value_network.to(device)
+
+        self._params = chain(self._policy_network.parameters(), self._value_network.parameters())
+        if embedding_network:
+            embedding_network = embedding_network.to(device)
+            self._params = chain(self._params, embedding_network.parameters())
+        self._embedding_network = embedding_network
+
+        self._optimizer = optim.Adam(self._params, lr=lr, betas=betas, weight_decay=weight_decay)
+        self._value_criteria = nn.MSELoss()
+
+        self._action_selection_fn, self._likelihood_fn = PPO._action_type[action_selection]
+        self._ppo_lower_bound = 1 - epsilon
+        self._ppo_upper_bound = 1 + epsilon
+        self._gamma = gamma
+        self._device = device
+        self._exp_replay_size = exp_replay_size
+        self._exp_replay = deque(maxlen=self._exp_replay_size)
+
+    def train(self, epochs, rollouts_per_epoch=100, max_episode_length=200,
+              policy_epochs=5, batch_size=256, environment_threads=1, data_loader_threads=1,
+              gif_name=''):
+        loop = tqdm(total=epochs, position=0, leave=False)
+
+        # Prepare the environments
+        environments = [self._env_factory.new() for _ in range(environment_threads)]
+        rollouts_per_thread = rollouts_per_epoch // environment_threads
+        remainder = rollouts_per_epoch % environment_threads
+        rollout_nums = ([rollouts_per_thread + 1] * remainder) + (
+                [rollouts_per_thread] * (environment_threads - remainder))
+
+        for e in range(epochs):
+            # Run the environments
+            experience_queue = Queue()
+            reward_queue = Queue()
+            threads = [Thread(target=_run_envs, args=(environments[i],
+                                                      self._embedding_network,
+                                                      self._policy_network,
+                                                      self._action_selection_fn,
+                                                      experience_queue,
+                                                      reward_queue,
+                                                      rollout_nums[i],
+                                                      max_episode_length,
+                                                      self._gamma,
+                                                      self._device,
+                                                      True)) for i in range(environment_threads)]
+            for x in threads:
+                x.start()
+            for x in threads:
+                x.join()
+
+            # Collect the experience
+            rollouts = list(experience_queue.queue)
+            avg_r = sum(reward_queue.queue) / reward_queue.qsize()
+            loop.set_description('avg reward: % 6.2f' % avg_r)
+            for rollout in rollouts:
+                self._exp_replay.append(rollout)
+
+            # Make gifs
+            if self._gif_epochs and e % self._gif_epochs == 0:
+                _make_gif(rollouts[0], os.path.join(self._gif_path, gif_name + '%d.gif' % e))
+
+            # Update the policy
+            experience_dataset = ExperienceDataset(list(self._exp_replay), ('state', 'action_data', 'action', 'reward', 'return'))
+            data_loader = DataLoader(experience_dataset, num_workers=data_loader_threads, batch_size=batch_size,
+                                     shuffle=True,
+                                     pin_memory=True)
+            avg_policy_loss = 0
+            avg_val_loss = 0
+            for _ in range(policy_epochs):
+                avg_policy_loss = 0
+                avg_val_loss = 0
+                for state, old_action_dist, old_action, reward, ret in data_loader:
+                    state = _prepare_tensor_batch(state, self._device)
+                    old_action_dist = _prepare_tensor_batch(old_action_dist, self._device)
+                    old_action = _prepare_tensor_batch(old_action, self._device)
+                    ret = _prepare_tensor_batch(ret, self._device).unsqueeze(1)
+
+                    self._optimizer.zero_grad()
+
+                    # If there is an embedding net, carry out the embedding
+                    if self._embedding_network:
+                        state = self._embedding_network(state)
+
+                    # Calculate the ratio term
+                    current_action_dist = self._policy_network(state)
+                    current_likelihood = self._likelihood_fn(current_action_dist, old_action)
+                    old_likelihood = self._likelihood_fn(old_action_dist, old_action)
+                    ratio = (current_likelihood / old_likelihood).detach()
+
+                    # Calculate the value loss
+                    expected_returns = self._value_network(state)
+                    val_loss = self._value_criteria(expected_returns, ret)
+
+                    # Calculate the policy loss
+                    advantage = ret - expected_returns.detach()
+                    lhs = ratio * torch.log(current_likelihood) * advantage
+                    rhs = torch.clamp(ratio, self._ppo_lower_bound, self._ppo_upper_bound) * torch.log(current_likelihood) * advantage
+                    policy_loss = -torch.mean(torch.min(lhs, rhs))
+                    # policy_loss = -torch.mean(ratio * torch.log(current_likelihood) * advantage)
+
+                    # For logging
+                    avg_val_loss += val_loss.item()
+                    avg_policy_loss += policy_loss.item()
+
+                    # Backpropagate
+                    loss = policy_loss + val_loss
+                    loss.backward()
+                    self._optimizer.step()
+
+                # Log info
+                avg_val_loss /= len(data_loader)
+                avg_policy_loss /= len(data_loader)
+                loop.set_description(
+                    'avg reward: % 6.2f, value loss: % 6.2f, policy loss: % 6.2f' % (
+                        avg_r, avg_val_loss, avg_policy_loss))
+            with open(self._csv_file, 'a+') as f:
+                f.write('%6.2f, %6.2f, %6.2f\n' % (avg_r, avg_val_loss, avg_policy_loss))
+            print()
+            loop.update(1)
 def _calculate_returns(trajectory, gamma):
     current_return = 0
     for i in reversed(range(len(trajectory))):

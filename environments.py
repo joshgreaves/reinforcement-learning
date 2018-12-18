@@ -3,7 +3,7 @@ import gym
 import holodeck
 from holodeck.sensors import Sensors
 import numpy as np
-import vizdoom as vzd
+# import vizdoom as vzd
 
 from rl import EnvironmentFactory
 from rl import RLEnvironment
