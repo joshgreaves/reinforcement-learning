@@ -253,7 +253,7 @@ class PPO(RlAlgorithm):
     }
 
     def __init__(self, env_factory, policy_network, value_network, action_selection='multinomial',
-                 embedding_network=None, device=torch.device('cpu'), epsilon=0.2, gamma=0.99, lr=1e-3,
+                 embedding_network=None, intrinsic_network=None, device=torch.device('cpu'), epsilon=0.2, gamma=0.99, lr=1e-3,
                  betas=(0.9, 0.999), weight_decay=0.01, experiment_name='project', gif_epochs=0,
                  csv_file='latest_run.csv'):
         super(PPO, self).__init__(env_factory, experiment_name, gif_epochs, csv_file)
@@ -266,6 +266,11 @@ class PPO(RlAlgorithm):
             embedding_network = embedding_network.to(device)
             self._params = chain(self._params, embedding_network.parameters())
         self._embedding_network = embedding_network
+
+        if intrinsic_network:
+            intrinsic_net = intrinsic_network.to(device)
+            self._params = chain(self._params, intrinsic_network.parameters())
+        self._intrinsic_network = intrinsic_network
 
         self._optimizer = optim.Adam(self._params, lr=lr, betas=betas, weight_decay=weight_decay)
         self._value_criteria = nn.MSELoss()
@@ -294,6 +299,7 @@ class PPO(RlAlgorithm):
             reward_queue = Queue()
             threads = [Thread(target=_run_envs, args=(environments[i],
                                                       self._embedding_network,
+                                                      self._intrinsic_network,
                                                       self._policy_network,
                                                       self._action_selection_fn,
                                                       experience_queue,
@@ -390,7 +396,7 @@ def _calculate_returns(trajectory, gamma):
         current_exp['return'] = current_return
 
 
-def _run_envs(env, embedding_net, policy, action_selection_fn, experience_queue, reward_queue, num_rollouts,
+def _run_envs(env, embedding_net, intrinsic_net, policy, action_selection_fn, experience_queue, reward_queue, num_rollouts,
               max_episode_length,
               gamma, device, calculate_returns=False):
     for _ in range(num_rollouts):
@@ -405,6 +411,9 @@ def _run_envs(env, embedding_net, policy, action_selection_fn, experience_queue,
             action_data = policy(input_state)
             action = action_selection_fn(action_data)[0]  # Remove the batch dimension
             s_prime, r, t = env.step(action)
+            
+            if intrinsic_net:
+                r += intrinsic_net(s_prime)
 
             current_exp = {
                 'state': s,
