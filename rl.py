@@ -324,11 +324,13 @@ class PPO(RlAlgorithm):
                                      pin_memory=True)
             avg_policy_loss = 0
             avg_val_loss = 0
+            avg_entropy_loss = 0
             for _ in range(policy_epochs):
                 avg_policy_loss = 0
                 avg_val_loss = 0
+                avg_entropy_loss = 0
                 for state, old_action_dist, old_action, reward, ret in data_loader:
-                    state = _prepare_tensor_batch(state, self._device)
+                    state = _prepare_tensor_batch(state, self._device) - 0.5
                     old_action_dist = _prepare_tensor_batch(old_action_dist, self._device)
                     old_action = _prepare_tensor_batch(old_action, self._device)
                     ret = _prepare_tensor_batch(ret, self._device).unsqueeze(1)
@@ -355,12 +357,16 @@ class PPO(RlAlgorithm):
                     rhs = torch.clamp(ratio, self._ppo_lower_bound, self._ppo_upper_bound) * advantage
                     policy_loss = -torch.mean(torch.min(lhs, rhs))
 
+                    # Calculate the entropy loss
+                    entropy_loss = -0.1 * torch.mean(_discrete_entropy(current_action_dist))
+
                     # For logging
                     avg_val_loss += val_loss.item()
                     avg_policy_loss += policy_loss.item()
+                    avg_entropy_loss += entropy_loss.item()
 
                     # Backpropagate
-                    loss = policy_loss + val_loss
+                    loss = policy_loss + val_loss + entropy_loss
                     loss.backward()
                     self._optimizer.step()
 
@@ -368,8 +374,8 @@ class PPO(RlAlgorithm):
                 avg_val_loss /= len(data_loader)
                 avg_policy_loss /= len(data_loader)
                 loop.set_description(
-                    'avg reward: % 6.2f, value loss: % 6.2f, policy loss: % 6.2f' % (
-                        avg_r, avg_val_loss, avg_policy_loss))
+                    'avg reward: % 6.2f, value loss: % 6.2f, policy loss: % 6.2f, entropy loss: % 6.2f' % (
+                        avg_r, avg_val_loss, avg_policy_loss, avg_entropy_loss))
             with open(self._csv_file, 'a+') as f:
                 f.write('%6.2f, %6.2f, %6.2f\n' % (avg_r, avg_val_loss, avg_policy_loss))
             print()
@@ -444,3 +450,8 @@ def _make_gif(rollout, filename):
     with imageio.get_writer(filename, mode='I', duration=1 / 30) as writer:
         for x in rollout:
             writer.append_data((x['state'][:, :, 0] * 255).astype(np.uint8))
+
+
+def _discrete_entropy(array):
+    log_prob = torch.log(array)
+    return -torch.sum(log_prob * array, dim=1, keepdim=True)
