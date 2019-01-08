@@ -1,7 +1,7 @@
 from torch import nn
 
 import rl
-from environments import CartPoleEnvironmentFactory
+from environments.gym import CartPoleEnvironmentFactory
 import networks as nets
 
 

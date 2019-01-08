@@ -2,7 +2,7 @@ import torch
 from torch import nn
 
 import rl
-from environments import MazeWorldEnvironmentFactory
+from environments.holodeck import MazeWorldEnvironmentFactory
 import networks as nets
 
 

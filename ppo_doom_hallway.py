@@ -1,7 +1,7 @@
 import torch
 
 from rl import *
-from environments import DoomHallwayFactory
+from environments.doom import DoomHallwayFactory
 import networks as nets
 
 

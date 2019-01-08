@@ -1,7 +1,7 @@
 import torch.nn as nn
 
 from rl import *
-from environments import CartPoleEnvironmentFactory
+from environments.gym import CartPoleEnvironmentFactory
 import networks as nets
 
 
@@ -17,4 +17,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
