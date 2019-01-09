@@ -268,7 +268,7 @@ class PPO(RlAlgorithm):
         self._embedding_network = embedding_network
 
         if intrinsic_network:
-            intrinsic_net = intrinsic_network.to(device)
+            intrinsic_network = intrinsic_network.to(device)
             self._params = chain(self._params, intrinsic_network.parameters())
         self._intrinsic_network = intrinsic_network
 
@@ -347,6 +347,10 @@ class PPO(RlAlgorithm):
                     if self._embedding_network:
                         state = self._embedding_network(state)
 
+                    intrinsic_loss = 0
+                    if self._intrinsic_network:
+                        intrinsic_loss = self._embedding_network(state).sum()
+
                     # Calculate the ratio term
                     current_action_dist = self._policy_network(state)
                     current_likelihood = self._likelihood_fn(current_action_dist, old_action)
@@ -372,7 +376,7 @@ class PPO(RlAlgorithm):
                     avg_entropy_loss += entropy_loss.item()
 
                     # Backpropagate
-                    loss = policy_loss + val_loss + entropy_loss
+                    loss = policy_loss + val_loss + entropy_loss + intrinsic_loss
                     loss.backward()
                     self._optimizer.step()
 

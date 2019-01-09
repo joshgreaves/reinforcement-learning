@@ -97,3 +97,33 @@ class EpsilonGreedy(nn.Module):
             # return the greedy choice
             return x
 
+class RND(nn.Module):
+    def __init__(self, state_size, hidden_dim=10):
+        super(RND, self).__init__()
+
+        self.predict = nn.Sequential(
+            nn.Linear(state_size, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU()
+        )
+        self.target = nn.Sequential(
+            nn.Linear(state_size, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU()
+        )
+        self.mse = nn.MSELoss()
+
+    def forward(self, x):
+        target = self.target(x)
+        prediction = self.predict(x)
+        return self.mse(prediction, target)
