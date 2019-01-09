@@ -272,7 +272,7 @@ class PPO(RlAlgorithm):
             self._params = chain(self._params, intrinsic_network.parameters())
         self._intrinsic_network = intrinsic_network
 
-        self._optimizer = optim.Adam(self._params, lr=lr, betas=betas, weight_decay=weight_decay)
+        self._optimizer = optim.Adam(filter(lambda p: p.requires_grad, self._params), lr=lr, betas=betas, weight_decay=weight_decay)
         self._value_criteria = nn.MSELoss()
 
         self._action_selection_fn, self._likelihood_fn = PPO._action_type[action_selection]
@@ -328,13 +328,12 @@ class PPO(RlAlgorithm):
             data_loader = DataLoader(experience_dataset, num_workers=data_loader_threads, batch_size=batch_size,
                                      shuffle=True,
                                      pin_memory=True)
-            avg_policy_loss = 0
-            avg_val_loss = 0
-            avg_entropy_loss = 0
+
             for _ in range(policy_epochs):
                 avg_policy_loss = 0
                 avg_val_loss = 0
                 avg_entropy_loss = 0
+                avg_intrinsic_loss = 0
                 for state, old_action_dist, old_action, reward, ret in data_loader:
                     state = _prepare_tensor_batch(state, self._device) - 0.5
                     old_action_dist = _prepare_tensor_batch(old_action_dist, self._device)
@@ -347,9 +346,10 @@ class PPO(RlAlgorithm):
                     if self._embedding_network:
                         state = self._embedding_network(state)
 
+                    # Calculate the intrinsic reward network loss
                     intrinsic_loss = 0
                     if self._intrinsic_network:
-                        intrinsic_loss = self._embedding_network(state).sum()
+                        intrinsic_loss = self._intrinsic_network(state)
 
                     # Calculate the ratio term
                     current_action_dist = self._policy_network(state)
@@ -374,6 +374,7 @@ class PPO(RlAlgorithm):
                     avg_val_loss += val_loss.item()
                     avg_policy_loss += policy_loss.item()
                     avg_entropy_loss += entropy_loss.item()
+                    avg_intrinsic_loss += intrinsic_loss.item()
 
                     # Backpropagate
                     loss = policy_loss + val_loss + entropy_loss + intrinsic_loss
@@ -383,9 +384,11 @@ class PPO(RlAlgorithm):
                 # Log info
                 avg_val_loss /= len(data_loader)
                 avg_policy_loss /= len(data_loader)
+                avg_entropy_loss /= len(data_loader)
+                avg_intrinsic_loss /= len(data_loader)
                 loop.set_description(
-                    'avg reward: % 6.2f, value loss: % 6.2f, policy loss: % 6.2f, entropy loss: % 6.2f' % (
-                        avg_r, avg_val_loss, avg_policy_loss, avg_entropy_loss))
+                    'avg reward: % 6.2f, value loss: % 6.2f, policy loss: % 6.2f, entropy loss: % 6.2f, intrinsic loss: % 6.2f' % (
+                        avg_r, avg_val_loss, avg_policy_loss, avg_entropy_loss, avg_intrinsic_loss))
             with open(self._csv_file, 'a+') as f:
                 f.write('%6.2f, %6.2f, %6.2f\n' % (avg_r, avg_val_loss, avg_policy_loss))
             print()
@@ -407,23 +410,29 @@ def _run_envs(env, embedding_net, intrinsic_net, policy, action_selection_fn, ex
         current_rollout = []
         s = env.reset()
         episode_reward = 0
-        for _ in range(max_episode_length):
-            input_state = _prepare_numpy(s, device)
-            if embedding_net:
-                input_state = embedding_net(input_state)
 
+        input_state = _prepare_numpy(s, device)
+        if embedding_net:
+            input_state = embedding_net(input_state)
+
+        for _ in range(max_episode_length):
             action_data = policy(input_state)
             action = action_selection_fn(action_data)[0]  # Remove the batch dimension
             s_prime, r, t = env.step(action)
-            
+
+            input_state = _prepare_numpy(s_prime, device)
+            if embedding_net:
+                input_state = embedding_net(input_state)
+
+            intrinsic_reward = 0
             if intrinsic_net:
-                r += intrinsic_net(s_prime)
+                intrinsic_reward = intrinsic_net(input_state).item()
 
             current_exp = {
                 'state': s,
                 'action': action,
                 'action_data': action_data.cpu().detach().numpy()[0],
-                'reward': r,
+                'reward': r + intrinsic_reward,
                 'terminal': t
             }
             current_rollout.append(current_exp)

@@ -123,6 +123,9 @@ class RND(nn.Module):
         )
         self.mse = nn.MSELoss()
 
+        for p in self.target.parameters():
+            p.requires_grad = False
+
     def forward(self, x):
         target = self.target(x)
         prediction = self.predict(x)
