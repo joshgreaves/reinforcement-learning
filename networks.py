@@ -106,20 +106,14 @@ class RND(nn.Module):
             nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU()
+            nn.Linear(hidden_dim, hidden_dim)
         )
         self.target = nn.Sequential(
             nn.Linear(state_size, hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU()
+            nn.Linear(hidden_dim, hidden_dim)
         )
         self.mse = nn.MSELoss()
 

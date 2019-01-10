@@ -347,9 +347,9 @@ class PPO(RlAlgorithm):
                         state = self._embedding_network(state)
 
                     # Calculate the intrinsic reward network loss
-                    intrinsic_loss = 0
+                    intrinsic_loss = torch.zeros(1)
                     if self._intrinsic_network:
-                        intrinsic_loss = self._intrinsic_network(state)
+                        intrinsic_loss = self._intrinsic_network(state) * 100
 
                     # Calculate the ratio term
                     current_action_dist = self._policy_network(state)
@@ -406,7 +406,7 @@ def _calculate_returns(trajectory, gamma):
 def _run_envs(env, embedding_net, intrinsic_net, policy, action_selection_fn, experience_queue, reward_queue, num_rollouts,
               max_episode_length,
               gamma, device, calculate_returns=False):
-    for _ in range(num_rollouts):
+    for i in range(num_rollouts):
         current_rollout = []
         s = env.reset()
         episode_reward = 0
@@ -416,6 +416,9 @@ def _run_envs(env, embedding_net, intrinsic_net, policy, action_selection_fn, ex
             input_state = embedding_net(input_state)
 
         for _ in range(max_episode_length):
+            if i == num_rollouts - 1:
+                env.render()
+
             action_data = policy(input_state)
             action = action_selection_fn(action_data)[0]  # Remove the batch dimension
             s_prime, r, t = env.step(action)
@@ -426,7 +429,7 @@ def _run_envs(env, embedding_net, intrinsic_net, policy, action_selection_fn, ex
 
             intrinsic_reward = 0
             if intrinsic_net:
-                intrinsic_reward = intrinsic_net(input_state).item()
+                intrinsic_reward = intrinsic_net(input_state).item() * 100
 
             current_exp = {
                 'state': s,
