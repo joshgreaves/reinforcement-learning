@@ -255,7 +255,7 @@ class PPO(RlAlgorithm):
     def __init__(self, env_factory, policy_network, value_network, action_selection='multinomial',
                  embedding_network=None, device=torch.device('cpu'), epsilon=0.2, gamma=0.99, lr=1e-3,
                  betas=(0.9, 0.999), weight_decay=0.01, experiment_name='project', gif_epochs=0,
-                 csv_file='latest_run.csv'):
+                 csv_file='latest_run.csv', count_fun=None):
         super(PPO, self).__init__(env_factory, experiment_name, gif_epochs, csv_file)
 
         self._policy_network = policy_network.to(device)
@@ -266,6 +266,8 @@ class PPO(RlAlgorithm):
             embedding_network = embedding_network.to(device)
             self._params = chain(self._params, embedding_network.parameters())
         self._embedding_network = embedding_network
+
+        self._count_fun = count_fun
 
         self._optimizer = optim.Adam(self._params, lr=lr, betas=betas, weight_decay=weight_decay)
         self._value_criteria = nn.MSELoss()
@@ -302,7 +304,8 @@ class PPO(RlAlgorithm):
                                                       max_episode_length,
                                                       self._gamma,
                                                       self._device,
-                                                      True)) for i in range(environment_threads)]
+                                                      True,
+                                                      self._count_fun)) for i in range(environment_threads)]
             for x in threads:
                 x.start()
             for x in threads:
@@ -366,7 +369,7 @@ class PPO(RlAlgorithm):
                     avg_entropy_loss += entropy_loss.item()
 
                     # Backpropagate
-                    loss = policy_loss + val_loss + entropy_loss
+                    loss = policy_loss + val_loss #+ entropy_loss
                     loss.backward()
                     self._optimizer.step()
 
@@ -392,12 +395,15 @@ def _calculate_returns(trajectory, gamma):
 
 def _run_envs(env, embedding_net, policy, action_selection_fn, experience_queue, reward_queue, num_rollouts,
               max_episode_length,
-              gamma, device, calculate_returns=False):
-    for _ in range(num_rollouts):
+              gamma, device, calculate_returns=False, count_fun=None):
+    for i in range(num_rollouts):
         current_rollout = []
         s = env.reset()
         episode_reward = 0
-        for _ in range(max_episode_length):
+        for j in range(max_episode_length):
+            if i == num_rollouts - 1:
+                env.render()
+
             input_state = _prepare_numpy(s, device)
             if embedding_net:
                 input_state = embedding_net(input_state)
@@ -405,6 +411,9 @@ def _run_envs(env, embedding_net, policy, action_selection_fn, experience_queue,
             action_data = policy(input_state)
             action = action_selection_fn(action_data)[0]  # Remove the batch dimension
             s_prime, r, t = env.step(action)
+
+            if count_fun is not None:
+                r += 50 / math.sqrt(count_fun(s_prime))
 
             current_exp = {
                 'state': s,
