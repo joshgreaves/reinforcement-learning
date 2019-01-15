@@ -45,7 +45,7 @@ class MazeWorldEnvironment(RLEnvironment):
 
     def _process_state(self, s):
         self._imgs = np.roll(self._imgs, 1, axis=2)
-        normalized = copy(s[Sensors.RGB_CAMERA][:, :, :3]).astype(np.float32) / 255.0
+        normalized = copy(s[Sensors.PIXEL_CAMERA][:, :, :3]).astype(np.float32) / 255.0
 
         self._imgs[:, :, 0] = 0.2126 * normalized[:, :, 0] + \
                               0.7152 * normalized[:, :, 1] + \

@@ -293,7 +293,7 @@ class PPO(RlAlgorithm):
 
         # Prepare the environments
         environments = [self._env_factory.new() for _ in range(environment_threads)]
-        viz_env = self._env_factory.new()
+        #viz_env = self._env_factory.new()
         rollouts_per_thread = rollouts_per_epoch // environment_threads
         remainder = rollouts_per_epoch % environment_threads
         rollout_nums = ([rollouts_per_thread + 1] * remainder) + (
@@ -302,7 +302,7 @@ class PPO(RlAlgorithm):
         for e in range(epochs):
             # Run the environments
             experience_queue = Queue()
-            reward_queue = Queue()
+            reward_queue = (Queue(), Queue())
             threads = [Thread(target=_run_envs, args=(environments[i],
                                                       self._embedding_network,
                                                       self._intrinsic_network,
@@ -321,11 +321,12 @@ class PPO(RlAlgorithm):
             for x in threads:
                 x.join()
 
-            _visualize_env(viz_env, self._policy_network, self._action_selection_fn, self._device)
+            #_visualize_env(viz_env, self._policy_network, self._action_selection_fn, self._device)
 
             # Collect the experience
             rollouts = list(experience_queue.queue)
-            avg_r = sum(reward_queue.queue) / reward_queue.qsize()
+            avg_r = sum(reward_queue[0].queue) / reward_queue[0].qsize()
+            avg_intr = sum(reward_queue[1].queue) / reward_queue[1].qsize()
             loop.set_description('avg reward: % 6.2f' % avg_r)
 
             # Make gifs
@@ -401,8 +402,8 @@ class PPO(RlAlgorithm):
                 avg_policy_loss /= len(data_loader)
                 avg_entropy_loss /= len(data_loader)
                 loop.set_description(
-                    'avg reward: % 6.2f, value loss: % 6.2f, policy loss: % 6.2f, intrinsic loss: % 6.2f' % (
-                        avg_r, avg_val_loss, avg_policy_loss, avg_intrinsic_loss))
+                    'avg reward: % 6.2f, avg intrinsic: % 6.2f, value loss: % 6.2f, policy loss: % 6.2f, intrinsic loss: % 6.2f' % (
+                        avg_r, avg_intr, avg_val_loss, avg_policy_loss, avg_intrinsic_loss))
             with open(self._csv_file, 'a+') as f:
                 f.write('%6.2f, %6.2f, %6.2f\n' % (avg_r, avg_val_loss, avg_policy_loss))
             print()
@@ -434,25 +435,26 @@ def _run_envs(env, embedding_net, intrinsic_net, intrinsic_target, policy, actio
         current_rollout = []
         s = env.reset()
         episode_reward = 0
+        episode_intrinsic = 0
 
         input_state = _prepare_numpy(s, device)
         if embedding_net:
-            input_state = embedding_net(input_state)
+            embedded_state = embedding_net(input_state)
 
         for _ in range(max_episode_length):
-            action_data = policy(input_state)
+            action_data = policy(embedded_state)
             action = action_selection_fn(action_data)[0]  # Remove the batch dimension
             s_prime, r, t = env.step(action)
 
             input_state = _prepare_numpy(s_prime, device)
             if embedding_net:
-                input_state = embedding_net(input_state)
+                embedded_state = embedding_net(input_state)
 
             intrinsic_reward = 0
             if intrinsic_net:
                 intrinsic_reward = torch.mean(
                     (intrinsic_target(input_state) - intrinsic_net(input_state)) ** 2.0).item()
-                intrinsic_reward *= 10
+                intrinsic_reward *= .01
 
             current_exp = {
                 'state': s,
@@ -463,13 +465,15 @@ def _run_envs(env, embedding_net, intrinsic_net, intrinsic_target, policy, actio
             }
             current_rollout.append(current_exp)
             episode_reward += r
+            episode_intrinsic += intrinsic_reward
             if t:
                 break
 
         if calculate_returns:
             _calculate_returns(current_rollout, gamma)
         experience_queue.put(current_rollout)
-        reward_queue.put(episode_reward)
+        reward_queue[0].put(episode_reward)
+        reward_queue[1].put(episode_intrinsic)
 
 
 # def _prepare_dqn_dataset(rollouts):
@@ -506,4 +510,4 @@ def _discrete_entropy(array):
 
 def _weights_init(m):
     if isinstance(m, nn.Conv2d) or isinstance(m, nn.Linear):
-        torch.nn.init.uniform_(m.weight.data, -0.5, 0.5)
+        torch.nn.init.uniform_(m.weight.data, -.2, .2)
