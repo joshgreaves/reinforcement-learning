@@ -253,7 +253,8 @@ class PPO(RlAlgorithm):
     }
 
     def __init__(self, env_factory, policy_network, value_network, action_selection='multinomial',
-                 embedding_network=None, intrinsic_network=None, device=torch.device('cpu'), epsilon=0.2, gamma=0.99, lr=1e-3,
+                 embedding_network=None, intrinsic_network=None, device=torch.device('cpu'), epsilon=0.2, gamma=0.99,
+                 lr=1e-3,
                  betas=(0.9, 0.999), weight_decay=0.01, experiment_name='project', gif_epochs=0,
                  csv_file='latest_run.csv'):
         super(PPO, self).__init__(env_factory, experiment_name, gif_epochs, csv_file)
@@ -267,12 +268,16 @@ class PPO(RlAlgorithm):
             self._params = chain(self._params, embedding_network.parameters())
         self._embedding_network = embedding_network
 
+        self._intrinsic_network = None
         if intrinsic_network:
-            intrinsic_network = intrinsic_network.to(device)
-            self._params = chain(self._params, intrinsic_network.parameters())
-        self._intrinsic_network = intrinsic_network
+            self._intrinsic_target = deepcopy(intrinsic_network).to(device)
+            self._intrinsic_target.apply(_weights_init)
+            self._intrinsic_target.requires_grad = False
+            self._intrinsic_network = intrinsic_network.to(device)
+            self._intrinsic_optimizer = optim.SGD(self._intrinsic_network.parameters(), lr=1e-2)
 
-        self._optimizer = optim.Adam(filter(lambda p: p.requires_grad, self._params), lr=lr, betas=betas, weight_decay=weight_decay)
+        self._optimizer = optim.Adam(self._params, lr=lr, betas=betas,
+                                     weight_decay=weight_decay)
         self._value_criteria = nn.MSELoss()
 
         self._action_selection_fn, self._likelihood_fn = PPO._action_type[action_selection]
@@ -288,6 +293,7 @@ class PPO(RlAlgorithm):
 
         # Prepare the environments
         environments = [self._env_factory.new() for _ in range(environment_threads)]
+        viz_env = self._env_factory.new()
         rollouts_per_thread = rollouts_per_epoch // environment_threads
         remainder = rollouts_per_epoch % environment_threads
         rollout_nums = ([rollouts_per_thread + 1] * remainder) + (
@@ -300,6 +306,7 @@ class PPO(RlAlgorithm):
             threads = [Thread(target=_run_envs, args=(environments[i],
                                                       self._embedding_network,
                                                       self._intrinsic_network,
+                                                      self._intrinsic_target,
                                                       self._policy_network,
                                                       self._action_selection_fn,
                                                       experience_queue,
@@ -313,6 +320,8 @@ class PPO(RlAlgorithm):
                 x.start()
             for x in threads:
                 x.join()
+
+            _visualize_env(viz_env, self._policy_network, self._action_selection_fn, self._device)
 
             # Collect the experience
             rollouts = list(experience_queue.queue)
@@ -329,13 +338,25 @@ class PPO(RlAlgorithm):
                                      shuffle=True,
                                      pin_memory=True)
 
+            # Calculate the intrinsic reward network loss
+            if self._intrinsic_network:
+                avg_intrinsic_loss = 0
+                for state, _, _, _, _ in data_loader:
+                    state = _prepare_tensor_batch(state, self._device)
+                    self._intrinsic_optimizer.zero_grad()
+                    intrinsic_loss = torch.mean(
+                        (self._intrinsic_target(state) - self._intrinsic_network(state)) ** 2.0)
+                    intrinsic_loss.backward()
+                    self._intrinsic_optimizer.step()
+                    avg_intrinsic_loss += intrinsic_loss.item()
+                avg_intrinsic_loss /= len(data_loader)
+
             for _ in range(policy_epochs):
                 avg_policy_loss = 0
                 avg_val_loss = 0
                 avg_entropy_loss = 0
-                avg_intrinsic_loss = 0
                 for state, old_action_dist, old_action, reward, ret in data_loader:
-                    state = _prepare_tensor_batch(state, self._device) - 0.5
+                    state = _prepare_tensor_batch(state, self._device)
                     old_action_dist = _prepare_tensor_batch(old_action_dist, self._device)
                     old_action = _prepare_tensor_batch(old_action, self._device)
                     ret = _prepare_tensor_batch(ret, self._device).unsqueeze(1)
@@ -345,11 +366,6 @@ class PPO(RlAlgorithm):
                     # If there is an embedding net, carry out the embedding
                     if self._embedding_network:
                         state = self._embedding_network(state)
-
-                    # Calculate the intrinsic reward network loss
-                    intrinsic_loss = torch.zeros(1)
-                    if self._intrinsic_network:
-                        intrinsic_loss = self._intrinsic_network(state) * 100
 
                     # Calculate the ratio term
                     current_action_dist = self._policy_network(state)
@@ -368,16 +384,15 @@ class PPO(RlAlgorithm):
                     policy_loss = -torch.mean(torch.min(lhs, rhs))
 
                     # Calculate the entropy loss
-                    entropy_loss = -0.1 * torch.mean(_discrete_entropy(current_action_dist))
+                    # entropy_loss = -0.1 * torch.mean(_discrete_entropy(current_action_dist))
 
                     # For logging
                     avg_val_loss += val_loss.item()
                     avg_policy_loss += policy_loss.item()
-                    avg_entropy_loss += entropy_loss.item()
-                    avg_intrinsic_loss += intrinsic_loss.item()
+                    # avg_entropy_loss += entropy_loss.item()
 
                     # Backpropagate
-                    loss = policy_loss + val_loss + entropy_loss + intrinsic_loss
+                    loss = policy_loss + val_loss  # + entropy_loss
                     loss.backward()
                     self._optimizer.step()
 
@@ -385,10 +400,9 @@ class PPO(RlAlgorithm):
                 avg_val_loss /= len(data_loader)
                 avg_policy_loss /= len(data_loader)
                 avg_entropy_loss /= len(data_loader)
-                avg_intrinsic_loss /= len(data_loader)
                 loop.set_description(
-                    'avg reward: % 6.2f, value loss: % 6.2f, policy loss: % 6.2f, entropy loss: % 6.2f, intrinsic loss: % 6.2f' % (
-                        avg_r, avg_val_loss, avg_policy_loss, avg_entropy_loss, avg_intrinsic_loss))
+                    'avg reward: % 6.2f, value loss: % 6.2f, policy loss: % 6.2f, intrinsic loss: % 6.2f' % (
+                        avg_r, avg_val_loss, avg_policy_loss, avg_intrinsic_loss))
             with open(self._csv_file, 'a+') as f:
                 f.write('%6.2f, %6.2f, %6.2f\n' % (avg_r, avg_val_loss, avg_policy_loss))
             print()
@@ -403,9 +417,19 @@ def _calculate_returns(trajectory, gamma):
         current_exp['return'] = current_return
 
 
-def _run_envs(env, embedding_net, intrinsic_net, policy, action_selection_fn, experience_queue, reward_queue, num_rollouts,
-              max_episode_length,
-              gamma, device, calculate_returns=False):
+def _visualize_env(env, policy, action_selection_fn, device):
+    s = env.reset()
+    input_state = _prepare_numpy(s, device)
+    for _ in range(200):
+        action_data = policy(input_state)
+        action = action_selection_fn(action_data)[0]  # Remove the batch dimension
+        s_prime, r, t = env.step(action)
+        env.render()
+        input_state = _prepare_numpy(s_prime, device)
+
+
+def _run_envs(env, embedding_net, intrinsic_net, intrinsic_target, policy, action_selection_fn, experience_queue,
+              reward_queue, num_rollouts, max_episode_length, gamma, device, calculate_returns=False):
     for i in range(num_rollouts):
         current_rollout = []
         s = env.reset()
@@ -416,9 +440,6 @@ def _run_envs(env, embedding_net, intrinsic_net, policy, action_selection_fn, ex
             input_state = embedding_net(input_state)
 
         for _ in range(max_episode_length):
-            if i == num_rollouts - 1:
-                env.render()
-
             action_data = policy(input_state)
             action = action_selection_fn(action_data)[0]  # Remove the batch dimension
             s_prime, r, t = env.step(action)
@@ -429,7 +450,9 @@ def _run_envs(env, embedding_net, intrinsic_net, policy, action_selection_fn, ex
 
             intrinsic_reward = 0
             if intrinsic_net:
-                intrinsic_reward = intrinsic_net(input_state).item() * 100
+                intrinsic_reward = torch.mean(
+                    (intrinsic_target(input_state) - intrinsic_net(input_state)) ** 2.0).item()
+                intrinsic_reward *= 10
 
             current_exp = {
                 'state': s,
@@ -442,7 +465,6 @@ def _run_envs(env, embedding_net, intrinsic_net, policy, action_selection_fn, ex
             episode_reward += r
             if t:
                 break
-            s = s_prime
 
         if calculate_returns:
             _calculate_returns(current_rollout, gamma)
@@ -480,3 +502,8 @@ def _make_gif(rollout, filename):
 def _discrete_entropy(array):
     log_prob = torch.log(array)
     return -torch.sum(log_prob * array, dim=1, keepdim=True)
+
+
+def _weights_init(m):
+    if isinstance(m, nn.Conv2d) or isinstance(m, nn.Linear):
+        torch.nn.init.uniform_(m.weight.data, -0.5, 0.5)

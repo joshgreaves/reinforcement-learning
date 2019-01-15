@@ -53,7 +53,6 @@ class HillClimbEnvironment(RLEnvironment):
 
     def reset(self):
         """Returns observation (np.ndarray)"""
-        self._env.close()
         return self._env.reset()
 
     def render(self):
