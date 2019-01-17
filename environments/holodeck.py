@@ -34,14 +34,14 @@ class MazeWorldEnvironment(RLEnvironment):
             self._next_interval += self._interval
 
         self._process_state(s)
-        return self._imgs, r, False
+        return self._imgs, s[Sensors.LOCATION_SENSOR], r, False
 
     def reset(self):
         self._imgs = np.zeros((self._res[0], self._res[1], self._prev_frames), dtype=np.float32)
         s, _, _, _ = self._env.reset()
         self._process_state(s)
         self._next_interval = self._interval
-        return self._imgs
+        return self._imgs, s[Sensors.LOCATION_SENSOR]
 
     def _process_state(self, s):
         self._imgs = np.roll(self._imgs, 1, axis=2)

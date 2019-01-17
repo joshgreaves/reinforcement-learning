@@ -68,6 +68,7 @@ class RlAlgorithm(object):
         self._experiment_name = experiment_name
         self._gif_epochs = gif_epochs
         self._gif_path, self._csv_file = self._prepare_experiment(experiment_name, gif_epochs, csv_file)
+        self._loc_file = 'experiments/' + experiment_name + '/loc_file.npy'
 
     def train(self, epochs, rollouts_per_epoch=100, max_episode_length=200,
               policy_epochs=5, batch_size=256, environment_threads=1, data_loader_threads=1,
@@ -269,12 +270,13 @@ class PPO(RlAlgorithm):
         self._embedding_network = embedding_network
 
         self._intrinsic_network = None
+        self._intrinsic_target = None
         if intrinsic_network:
             self._intrinsic_target = deepcopy(intrinsic_network).to(device)
             self._intrinsic_target.apply(_weights_init)
             self._intrinsic_target.requires_grad = False
             self._intrinsic_network = intrinsic_network.to(device)
-            self._intrinsic_optimizer = optim.SGD(self._intrinsic_network.parameters(), lr=1e-2)
+            self._intrinsic_optimizer = optim.Adam(self._intrinsic_network.parameters(), lr=1e-3)
 
         self._optimizer = optim.Adam(self._params, lr=lr, betas=betas,
                                      weight_decay=weight_decay)
@@ -298,11 +300,13 @@ class PPO(RlAlgorithm):
         remainder = rollouts_per_epoch % environment_threads
         rollout_nums = ([rollouts_per_thread + 1] * remainder) + (
                 [rollouts_per_thread] * (environment_threads - remainder))
+        np.save(self._loc_file, np.zeros((1, rollouts_per_epoch, max_episode_length + 1, 3)))
 
         for e in range(epochs):
             # Run the environments
             experience_queue = Queue()
             reward_queue = (Queue(), Queue())
+            locations = []
             threads = [Thread(target=_run_envs, args=(environments[i],
                                                       self._embedding_network,
                                                       self._intrinsic_network,
@@ -313,6 +317,7 @@ class PPO(RlAlgorithm):
                                                       reward_queue,
                                                       rollout_nums[i],
                                                       max_episode_length,
+                                                      locations,
                                                       self._gamma,
                                                       self._device,
                                                       True)) for i in range(environment_threads)]
@@ -340,8 +345,8 @@ class PPO(RlAlgorithm):
                                      pin_memory=True)
 
             # Calculate the intrinsic reward network loss
+            avg_intrinsic_loss = 0
             if self._intrinsic_network:
-                avg_intrinsic_loss = 0
                 for state, _, _, _, _ in data_loader:
                     state = _prepare_tensor_batch(state, self._device)
                     self._intrinsic_optimizer.zero_grad()
@@ -406,6 +411,9 @@ class PPO(RlAlgorithm):
                         avg_r, avg_intr, avg_val_loss, avg_policy_loss, avg_intrinsic_loss))
             with open(self._csv_file, 'a+') as f:
                 f.write('%6.2f, %6.2f, %6.2f\n' % (avg_r, avg_val_loss, avg_policy_loss))
+            l = np.load(self._loc_file)
+            l = np.append(l, [locations], axis=0)
+            np.save(self._loc_file, l)
             print()
             loop.update(1)
 
@@ -430,12 +438,13 @@ def _visualize_env(env, policy, action_selection_fn, device):
 
 
 def _run_envs(env, embedding_net, intrinsic_net, intrinsic_target, policy, action_selection_fn, experience_queue,
-              reward_queue, num_rollouts, max_episode_length, gamma, device, calculate_returns=False):
+              reward_queue, num_rollouts, max_episode_length, locations, gamma, device, calculate_returns=False):
     for i in range(num_rollouts):
         current_rollout = []
-        s = env.reset()
+        s, loc = env.reset()
         episode_reward = 0
         episode_intrinsic = 0
+        episode_loc = [loc]
 
         input_state = _prepare_numpy(s, device)
         if embedding_net:
@@ -444,7 +453,7 @@ def _run_envs(env, embedding_net, intrinsic_net, intrinsic_target, policy, actio
         for _ in range(max_episode_length):
             action_data = policy(embedded_state)
             action = action_selection_fn(action_data)[0]  # Remove the batch dimension
-            s_prime, r, t = env.step(action)
+            s_prime, loc, r, t = env.step(action)
 
             input_state = _prepare_numpy(s_prime, device)
             if embedding_net:
@@ -454,16 +463,17 @@ def _run_envs(env, embedding_net, intrinsic_net, intrinsic_target, policy, actio
             if intrinsic_net:
                 intrinsic_reward = torch.mean(
                     (intrinsic_target(input_state) - intrinsic_net(input_state)) ** 2.0).item()
-                intrinsic_reward *= .01
+                intrinsic_reward *= .001
 
             current_exp = {
                 'state': s,
                 'action': action,
                 'action_data': action_data.cpu().detach().numpy()[0],
-                'reward': r + intrinsic_reward,
+                'reward': intrinsic_reward,
                 'terminal': t
             }
             current_rollout.append(current_exp)
+            episode_loc.append(loc)
             episode_reward += r
             episode_intrinsic += intrinsic_reward
             if t:
@@ -472,8 +482,10 @@ def _run_envs(env, embedding_net, intrinsic_net, intrinsic_target, policy, actio
         if calculate_returns:
             _calculate_returns(current_rollout, gamma)
         experience_queue.put(current_rollout)
+        locations.append(episode_loc)
         reward_queue[0].put(episode_reward)
         reward_queue[1].put(episode_intrinsic)
+
 
 
 # def _prepare_dqn_dataset(rollouts):
@@ -510,4 +522,4 @@ def _discrete_entropy(array):
 
 def _weights_init(m):
     if isinstance(m, nn.Conv2d) or isinstance(m, nn.Linear):
-        torch.nn.init.uniform_(m.weight.data, -.2, .2)
+        torch.nn.init.xavier_normal_(m.weight.data)
