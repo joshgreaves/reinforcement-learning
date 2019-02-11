@@ -12,6 +12,7 @@ import numpy as np
 import os
 from queue import Queue
 import random
+import matplotlib.pyplot as plt
 
 
 class RLEnvironment(object):
@@ -47,13 +48,14 @@ class ExperienceDataset(Dataset):
     def __init__(self, experience, keys):
         super(ExperienceDataset, self).__init__()
         self._exp = []
-        for x in experience:
-            self._exp.extend(x)
+        for exp in experience:
+            self._exp.extend(exp)
         self._length = len(self._exp)
         self._keys = keys
 
     def __getitem__(self, index):
         chosen_exp = self._exp[index]
+        # np.array([np.array(x) for x in zip(*[x.values() for x in chosen_exp])])
         return tuple(chosen_exp[k] for k in self._keys)
 
     def __len__(self):
@@ -67,7 +69,8 @@ class RlAlgorithm(object):
 
         self._experiment_name = experiment_name
         self._gif_epochs = gif_epochs
-        self._gif_path, self._csv_file = self._prepare_experiment(experiment_name, gif_epochs, csv_file)
+        self._experiment_path, self._gif_path, self._csv_file = self._prepare_experiment(experiment_name, gif_epochs,
+                                                                                         csv_file)
 
     def train(self, epochs, rollouts_per_epoch=100, max_episode_length=200,
               policy_epochs=5, batch_size=256, environment_threads=1, data_loader_threads=1,
@@ -89,7 +92,7 @@ class RlAlgorithm(object):
         # Clear the csv file
         with open(csv_file, 'w') as f:
             f.write('avg_reward, value_loss, policy_loss')
-        return gif_path, csv_file
+        return experiment_path, gif_path, csv_file
 
 
 def multinomial_likelihood(dist, idx):
@@ -125,6 +128,12 @@ def get_epsilon_greedy_selection(epsilon):
         return actions
 
     return epsilon_greedy_selection
+
+
+def softmax(tensor):
+    exp = torch.exp(tensor)
+    sums = torch.sum(exp, dim=1, keepdim=True)
+    return exp / sums
 
 
 # class DQN(RlAlgorithm):
@@ -268,14 +277,6 @@ class PPO(RlAlgorithm):
             self._params = chain(self._params, embedding_network.parameters())
         self._embedding_network = embedding_network
 
-        self._intrinsic_network = None
-        if intrinsic_network:
-            self._intrinsic_target = deepcopy(intrinsic_network).to(device)
-            self._intrinsic_target.apply(_weights_init)
-            self._intrinsic_target.requires_grad = False
-            self._intrinsic_network = intrinsic_network.to(device)
-            self._intrinsic_optimizer = optim.SGD(self._intrinsic_network.parameters(), lr=1e-2)
-
         self._optimizer = optim.Adam(self._params, lr=lr, betas=betas,
                                      weight_decay=weight_decay)
         self._value_criteria = nn.MSELoss()
@@ -293,20 +294,36 @@ class PPO(RlAlgorithm):
 
         # Prepare the environments
         environments = [self._env_factory.new() for _ in range(environment_threads)]
-        viz_env = self._env_factory.new()
+
+        start_state = _prepare_numpy(environments[0].reset(), self._device)
+
         rollouts_per_thread = rollouts_per_epoch // environment_threads
         remainder = rollouts_per_epoch % environment_threads
         rollout_nums = ([rollouts_per_thread + 1] * remainder) + (
                 [rollouts_per_thread] * (environment_threads - remainder))
 
         for e in range(epochs):
+            # Plot the distributions
+            distribution = self._value_network(self._embedding_network(start_state))
+            weights, means, variances = torch.split(distribution, 5, dim=1)
+            weights = softmax(weights).squeeze(0).detach().cpu().numpy()
+            variances = (torch.abs(variances) + 1e-3).squeeze(0).detach().cpu().numpy()
+            means = means.squeeze(0).detach().cpu().numpy()
+            xs = np.linspace(-1, 10, 500)
+            ys = np.zeros(xs.shape)
+            for i, x in enumerate(xs):
+                ys[i] = sum([weights[j] * np.exp(-((x - means[j]) ** 2.0) / (2 * variances[j])) / (
+                    np.sqrt(2 * np.pi * variances[j])) for j in range(5)])
+            plt.ylim((0.0, 3.0))
+            plt.plot(xs, ys)
+            plt.savefig(os.path.join(self._gif_path, "plot" + str(e) + ".png"))
+            plt.close()
+
             # Run the environments
             experience_queue = Queue()
             reward_queue = Queue()
             threads = [Thread(target=_run_envs, args=(environments[i],
                                                       self._embedding_network,
-                                                      self._intrinsic_network,
-                                                      self._intrinsic_target,
                                                       self._policy_network,
                                                       self._action_selection_fn,
                                                       experience_queue,
@@ -320,8 +337,6 @@ class PPO(RlAlgorithm):
                 x.start()
             for x in threads:
                 x.join()
-
-            _visualize_env(viz_env, self._policy_network, self._action_selection_fn, self._device)
 
             # Collect the experience
             rollouts = list(experience_queue.queue)
@@ -337,19 +352,6 @@ class PPO(RlAlgorithm):
             data_loader = DataLoader(experience_dataset, num_workers=data_loader_threads, batch_size=batch_size,
                                      shuffle=True,
                                      pin_memory=True)
-
-            # Calculate the intrinsic reward network loss
-            if self._intrinsic_network:
-                avg_intrinsic_loss = 0
-                for state, _, _, _, _ in data_loader:
-                    state = _prepare_tensor_batch(state, self._device)
-                    self._intrinsic_optimizer.zero_grad()
-                    intrinsic_loss = torch.mean(
-                        (self._intrinsic_target(state) - self._intrinsic_network(state)) ** 2.0)
-                    intrinsic_loss.backward()
-                    self._intrinsic_optimizer.step()
-                    avg_intrinsic_loss += intrinsic_loss.item()
-                avg_intrinsic_loss /= len(data_loader)
 
             for _ in range(policy_epochs):
                 avg_policy_loss = 0
@@ -374,8 +376,18 @@ class PPO(RlAlgorithm):
                     ratio = (current_likelihood / old_likelihood)
 
                     # Calculate the value loss
-                    expected_returns = self._value_network(state)
-                    val_loss = self._value_criteria(expected_returns, ret)
+                    value_distribution = self._value_network(state)
+                    weights, means, variances = torch.split(value_distribution, 5, dim=1)
+                    weights = softmax(weights)
+                    variances = torch.abs(variances) + 1e-3
+                    upper = (ret - means) ** 2.0
+                    twosig = 2 * variances
+                    expected_returns = torch.sum(weights * means, dim=1, keepdim=True)
+                    val_loss = torch.exp(-upper / twosig) / torch.sqrt(twosig * 3.14159)
+                    val_loss = torch.sum(val_loss * weights, dim=1)
+                    val_loss = -torch.mean(val_loss)
+                    # expected_returns = self._value_network(state)
+                    # val_loss = self._value_criteria(expected_returns, ret)
 
                     # Calculate the policy loss
                     advantage = ret - expected_returns.detach()
@@ -384,15 +396,15 @@ class PPO(RlAlgorithm):
                     policy_loss = -torch.mean(torch.min(lhs, rhs))
 
                     # Calculate the entropy loss
-                    # entropy_loss = -0.1 * torch.mean(_discrete_entropy(current_action_dist))
+                    entropy_loss = -0.01 * torch.mean(_discrete_entropy(current_action_dist))
 
                     # For logging
                     avg_val_loss += val_loss.item()
                     avg_policy_loss += policy_loss.item()
-                    # avg_entropy_loss += entropy_loss.item()
+                    avg_entropy_loss += entropy_loss.item()
 
                     # Backpropagate
-                    loss = policy_loss + val_loss  # + entropy_loss
+                    loss = policy_loss + 2 * val_loss + entropy_loss
                     loss.backward()
                     self._optimizer.step()
 
@@ -401,10 +413,117 @@ class PPO(RlAlgorithm):
                 avg_policy_loss /= len(data_loader)
                 avg_entropy_loss /= len(data_loader)
                 loop.set_description(
-                    'avg reward: % 6.2f, value loss: % 6.2f, policy loss: % 6.2f, intrinsic loss: % 6.2f' % (
-                        avg_r, avg_val_loss, avg_policy_loss, avg_intrinsic_loss))
+                    'avg reward: % 6.2f, value loss: % 6.2f, policy loss: % 6.2f, entropy loss: % 6.2f' % (
+                        avg_r, avg_val_loss, avg_policy_loss, avg_entropy_loss))
             with open(self._csv_file, 'a+') as f:
-                f.write('%6.2f, %6.2f, %6.2f\n' % (avg_r, avg_val_loss, avg_policy_loss))
+                f.write('%6.2f, %6.2f, %6.2f, %6.2f\n' % (avg_r, avg_val_loss, avg_policy_loss, avg_entropy_loss))
+            print()
+            loop.update(1)
+
+
+class OPPG(RlAlgorithm):
+    _action_type = {
+        'multinomial': (multinomial_selection, multinomial_likelihood),
+    }
+
+    def __init__(self, env_factory, policy_network, action_selection='multinomial',
+                 device=torch.device('cpu'), gamma=0.99, lr=1e-3,
+                 betas=(0.9, 0.999), weight_decay=0.01, experiment_name='project', gif_epochs=0,
+                 csv_file='latest_run.csv'):
+        super(OPPG, self).__init__(env_factory, experiment_name, gif_epochs, csv_file)
+
+        self._policy_network = policy_network.to(device)
+
+        self._params = self._policy_network.parameters()
+        self._optimizer = optim.Adam(self._params, lr=lr, betas=betas, weight_decay=weight_decay)
+
+        self._action_selection_fn, self._likelihood_fn = OPPG._action_type[action_selection]
+        self._gamma = gamma
+        self._device = device
+
+    def train(self, epochs, rollouts_per_epoch=100, max_episode_length=200,
+              policy_epochs=5, batch_size=256, environment_threads=1, data_loader_threads=1,
+              gif_name=''):
+        loop = tqdm(total=epochs, position=0, leave=False)
+
+        # Prepare the environments
+        environments = [self._env_factory.new() for _ in range(environment_threads)]
+        rollouts_per_thread = rollouts_per_epoch // environment_threads
+        remainder = rollouts_per_epoch % environment_threads
+        rollout_nums = ([rollouts_per_thread + 1] * remainder) + (
+                [rollouts_per_thread] * (environment_threads - remainder))
+        rollouts = []
+
+        for e in range(epochs):
+            # Run the environments
+            experience_queue = Queue()
+            reward_queue = Queue()
+            threads = [Thread(target=_run_envs, args=(environments[i],
+                                                      None,
+                                                      None,
+                                                      None,
+                                                      self._policy_network,
+                                                      self._action_selection_fn,
+                                                      experience_queue,
+                                                      reward_queue,
+                                                      rollout_nums[i],
+                                                      max_episode_length,
+                                                      self._gamma,
+                                                      self._device,
+                                                      True)) for i in range(environment_threads)]
+            for x in threads:
+                x.start()
+            for x in threads:
+                x.join()
+
+            # Collect the experience
+            rollouts.extend(list(experience_queue.queue))
+            avg_r = sum(reward_queue.queue) / reward_queue.qsize()
+            loop.set_description('avg reward: % 6.2f' % avg_r)
+
+            print(len(rollouts))
+
+            # # Make gifs
+            # if self._gif_epochs and e % self._gif_epochs == 0:
+            #     _make_gif(rollouts[0], os.path.join(self._gif_path, gif_name + '%d.gif' % e))
+
+            # Update the policy
+            experience_dataset = ExperienceDataset(rollouts, ('state', 'action_data', 'action', 'reward', 'return'))
+            data_loader = DataLoader(experience_dataset, num_workers=data_loader_threads, batch_size=batch_size,
+                                     shuffle=True, pin_memory=True)
+
+            for _ in range(policy_epochs):
+                avg_policy_loss = 0
+                avg_val_loss = 0
+                avg_entropy_loss = 0
+                for state, old_action_dist, old_action, reward, ret in data_loader:
+                    state = _prepare_tensor_batch(state, self._device)
+                    old_action_dist = _prepare_tensor_batch(old_action_dist, self._device)
+                    old_action = _prepare_tensor_batch(old_action, self._device)
+                    reward = _prepare_tensor_batch(reward, self._device).unsqueeze(1)
+                    ret = _prepare_tensor_batch(ret, self._device).unsqueeze(1)
+
+                    self._optimizer.zero_grad()
+
+                    current_dist = self._policy_network(state)
+                    current_action_likelihoods = self._likelihood_fn(current_dist, old_action)
+                    ratio = current_action_likelihoods.detach() / self._likelihood_fn(old_action_dist, old_action)
+                    inner = ratio * reward
+
+                    loss = -torch.mean(inner * torch.log(current_action_likelihoods))
+
+                    # For logging
+                    avg_policy_loss += loss.item()
+
+                    loss.backward()
+                    self._optimizer.step()
+
+                # Log info
+                avg_val_loss /= len(data_loader)
+                avg_policy_loss /= len(data_loader)
+                avg_entropy_loss /= len(data_loader)
+                loop.set_description(
+                    'avg reward: % 6.2f, policy loss: % 6.2f' % (avg_r, avg_policy_loss))
             print()
             loop.update(1)
 
@@ -428,7 +547,7 @@ def _visualize_env(env, policy, action_selection_fn, device):
         input_state = _prepare_numpy(s_prime, device)
 
 
-def _run_envs(env, embedding_net, intrinsic_net, intrinsic_target, policy, action_selection_fn, experience_queue,
+def _run_envs(env, embedding_net, policy, action_selection_fn, experience_queue,
               reward_queue, num_rollouts, max_episode_length, gamma, device, calculate_returns=False):
     for i in range(num_rollouts):
         current_rollout = []
@@ -448,17 +567,11 @@ def _run_envs(env, embedding_net, intrinsic_net, intrinsic_target, policy, actio
             if embedding_net:
                 input_state = embedding_net(input_state)
 
-            intrinsic_reward = 0
-            if intrinsic_net:
-                intrinsic_reward = torch.mean(
-                    (intrinsic_target(input_state) - intrinsic_net(input_state)) ** 2.0).item()
-                intrinsic_reward *= 10
-
             current_exp = {
                 'state': s,
                 'action': action,
                 'action_data': action_data.cpu().detach().numpy()[0],
-                'reward': r + intrinsic_reward,
+                'reward': r,
                 'terminal': t
             }
             current_rollout.append(current_exp)
