@@ -12,6 +12,8 @@ import numpy as np
 import os
 from queue import Queue
 import random
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
 
@@ -310,12 +312,20 @@ class PPO(RlAlgorithm):
             variances = (torch.abs(variances) + 1e-3).squeeze(0).detach().cpu().numpy()
             means = means.squeeze(0).detach().cpu().numpy()
             xs = np.linspace(-1, 10, 500)
-            ys = np.zeros(xs.shape)
+            ys = np.zeros((xs.shape[0], 6), dtype=np.float32)
             for i, x in enumerate(xs):
-                ys[i] = sum([weights[j] * np.exp(-((x - means[j]) ** 2.0) / (2 * variances[j])) / (
-                    np.sqrt(2 * np.pi * variances[j])) for j in range(5)])
+                ys[i, 1:] = [weights[j] * np.exp(-((x - means[j]) ** 2.0) / (2 * variances[j])) / (
+                    np.sqrt(2 * np.pi * variances[j])) for j in range(5)]
+                ys[i, 0] = np.sum(ys[i, 1:])
             plt.ylim((0.0, 3.0))
+            plt.axvline(x=0.0)
             plt.plot(xs, ys)
+            plt.savefig(os.path.join(self._gif_path, "plot" + str(e) + "_combined.png"))
+            plt.close()
+
+            plt.ylim((0.0, 3.0))
+            plt.axvline(x=0.0)
+            plt.plot(xs, ys[:, 0])
             plt.savefig(os.path.join(self._gif_path, "plot" + str(e) + ".png"))
             plt.close()
 
@@ -396,7 +406,7 @@ class PPO(RlAlgorithm):
                     policy_loss = -torch.mean(torch.min(lhs, rhs))
 
                     # Calculate the entropy loss
-                    entropy_loss = -0.01 * torch.mean(_discrete_entropy(current_action_dist))
+                    entropy_loss = -0.05 * torch.mean(_discrete_entropy(current_action_dist))
 
                     # For logging
                     avg_val_loss += val_loss.item()
@@ -404,7 +414,7 @@ class PPO(RlAlgorithm):
                     avg_entropy_loss += entropy_loss.item()
 
                     # Backpropagate
-                    loss = policy_loss + 2 * val_loss + entropy_loss
+                    loss = policy_loss + val_loss + entropy_loss
                     loss.backward()
                     self._optimizer.step()
 
@@ -578,6 +588,7 @@ def _run_envs(env, embedding_net, policy, action_selection_fn, experience_queue,
             episode_reward += r
             if t:
                 break
+            s = s_prime
 
         if calculate_returns:
             _calculate_returns(current_rollout, gamma)
@@ -608,8 +619,8 @@ def _prepare_tensor_batch(tensor, device):
 
 def _make_gif(rollout, filename):
     with imageio.get_writer(filename, mode='I', duration=1 / 30) as writer:
-        for x in rollout:
-            writer.append_data((x['state'][:, :, 0] * 255).astype(np.uint8))
+        for i, x in enumerate(rollout):
+            writer.append_data(((x['state'][:, :, 0] + 0.5) * 255).astype(np.uint8))
 
 
 def _discrete_entropy(array):

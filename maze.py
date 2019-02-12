@@ -17,8 +17,8 @@ def train_ppo():
     value = nets.FourLayerMlp(conv.get_output_dim(), num_mixtures * 3, hidden_dim=100)
 
     ppo = rl.PPO(factory, policy, value, embedding_network=conv, device=torch.device('cuda'), gamma=0.99,
-                 experiment_name='holodeck_maze_distribution', gif_epochs=5, epsilon=0.4)
-    ppo.train(1000, rollouts_per_epoch=36, max_episode_length=450, environment_threads=9, data_loader_threads=10,
+                 experiment_name='holodeck_maze_distribution2', gif_epochs=5, epsilon=0.1)
+    ppo.train(1000, rollouts_per_epoch=72, max_episode_length=450, environment_threads=9, data_loader_threads=10,
               policy_epochs=5)
 
 
