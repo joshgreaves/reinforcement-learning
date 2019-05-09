@@ -13,8 +13,8 @@ def train_ppo():
     )
     value = nets.FourLayerMlp(4, 1, hidden_dim=10)
 
-    ppo = rl.PPO(factory, policy, value, experiment_name='cartpole_basic')
-    ppo.train(100, rollouts_per_epoch=100, max_episode_length=200, policy_epochs=5, batch_size=256)
+    ppo = rl.PPO(factory, policy, value, experiment_name='cartpole_basic', gamma=0.9, backup_n=10)
+    ppo.train(100, rollouts_per_epoch=100, max_episode_length=200, policy_epochs=5, batch_size=32)
 
 
 def train_dqn():

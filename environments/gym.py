@@ -2,8 +2,7 @@ from copy import copy
 import gym
 import numpy as np
 
-from rl import EnvironmentFactory
-from rl import RLEnvironment
+from . import EnvironmentFactory, RLEnvironment
 
 
 class CartPoleEnvironmentFactory(EnvironmentFactory):

@@ -13,48 +13,65 @@ import os
 from queue import Queue
 import random
 
-
-class RLEnvironment(object):
-    """An RL Environment, used for wrapping environments to run PPO on."""
-
-    def __init__(self):
-        super(RLEnvironment, self).__init__()
-
-    def step(self, x):
-        """Takes an action x, which is the same format as the output from a policy network.
-        Returns observation (np.ndarray), reward (float), terminal (boolean)
-        """
-        raise NotImplementedError()
-
-    def reset(self):
-        """Resets the environment.
-        Returns observation (np.ndarray)
-        """
-        raise NotImplementedError()
-
-
-class EnvironmentFactory(object):
-    """Creates new environment objects"""
-
-    def __init__(self):
-        super(EnvironmentFactory, self).__init__()
-
-    def new(self):
-        raise NotImplementedError()
+from environments import EnvironmentFactory
 
 
 class ExperienceDataset(Dataset):
-    def __init__(self, experience, keys):
+    def __init__(self, experience, backup_n=5, gamma=0.99):
         super(ExperienceDataset, self).__init__()
+        assert (backup_n > 0)
+
         self._exp = []
-        for x in experience:
-            self._exp.extend(x)
+        for rollout in experience:
+            if backup_n == float('inf'):
+                ret = 0
+                for x in reversed(rollout):
+                    exp = dict()
+                    ret *= gamma
+                    ret += x['reward']
+                    exp['state'] = x['state']
+                    exp['action'] = x['action']
+                    exp['action_dist'] = x['action_dist']
+                    exp['return'] = ret
+                    exp['terminal'] = x['terminal']
+                    self._exp.append(exp)
+            else:
+                for i, x in enumerate(rollout):
+                    exp = dict()
+                    exp['state'] = x['state']
+                    exp['action'] = x['action']
+                    exp['action_dist'] = x['action_dist']
+                    r, current_gamma = 0, 1
+                    for j in range(i, min(len(rollout), i + backup_n)):
+                        r += current_gamma * rollout[j]['reward']
+                        current_gamma *= gamma
+                    exp['return'] = r
+                    nth_exp = rollout[min(i + backup_n, len(rollout) - 1)]
+                    exp['s_prime'] = nth_exp['state']
+                    exp['terminal'] = x['terminal']
+                    exp['gamma'] = gamma**(min(len(rollout), i + backup_n) - i)
+                    self._exp.append(exp)
+
         self._length = len(self._exp)
-        self._keys = keys
+        self._backup_n = backup_n
 
     def __getitem__(self, index):
         chosen_exp = self._exp[index]
-        return tuple(chosen_exp[k] for k in self._keys)
+
+        if self._backup_n == float('inf'):
+            return (chosen_exp['state'],
+                    chosen_exp['action_dist'],
+                    chosen_exp['action'],
+                    chosen_exp['return'],
+                    chosen_exp['terminal'])
+        else:
+            return (chosen_exp['state'],
+                    chosen_exp['action_dist'],
+                    chosen_exp['action'],
+                    chosen_exp['return'],
+                    chosen_exp['s_prime'],
+                    chosen_exp['terminal'],
+                    chosen_exp['gamma'])
 
     def __len__(self):
         return self._length
@@ -255,11 +272,15 @@ class PPO(RlAlgorithm):
     def __init__(self, env_factory, policy_network, value_network, action_selection='multinomial',
                  embedding_network=None, device=torch.device('cpu'), epsilon=0.2, gamma=0.99, lr=1e-3,
                  betas=(0.9, 0.999), weight_decay=0.01, experiment_name='project', gif_epochs=0,
-                 csv_file='latest_run.csv'):
+                 csv_file='latest_run.csv', entropy_coefficient=1e-3, backup_n=5):
         super(PPO, self).__init__(env_factory, experiment_name, gif_epochs, csv_file)
 
         self._policy_network = policy_network.to(device)
         self._value_network = value_network.to(device)
+        if backup_n == float('inf'):
+            self._value_target_network = None
+        else:
+            self._value_target_network = deepcopy(self._value_network)
 
         self._params = chain(self._policy_network.parameters(), self._value_network.parameters())
         if embedding_network:
@@ -268,12 +289,15 @@ class PPO(RlAlgorithm):
         self._embedding_network = embedding_network
 
         self._optimizer = optim.Adam(self._params, lr=lr, betas=betas, weight_decay=weight_decay)
+        # self._optimizer = optim.RMSprop(self._params, lr=lr, weight_decay=weight_decay)
         self._value_criteria = nn.MSELoss()
 
         self._action_selection_fn, self._likelihood_fn = PPO._action_type[action_selection]
         self._ppo_lower_bound = 1 - epsilon
         self._ppo_upper_bound = 1 + epsilon
         self._gamma = gamma
+        self._entropy_coefficient = entropy_coefficient
+        self._backup_n = backup_n
         self._device = device
 
     def train(self, epochs, rollouts_per_epoch=100, max_episode_length=200,
@@ -289,6 +313,9 @@ class PPO(RlAlgorithm):
                 [rollouts_per_thread] * (environment_threads - remainder))
 
         for e in range(epochs):
+            if self._value_target_network is not None:
+                self._value_target_network = deepcopy(self._value_network)
+
             # Run the environments
             experience_queue = Queue()
             reward_queue = Queue()
@@ -300,9 +327,7 @@ class PPO(RlAlgorithm):
                                                       reward_queue,
                                                       rollout_nums[i],
                                                       max_episode_length,
-                                                      self._gamma,
-                                                      self._device,
-                                                      True)) for i in range(environment_threads)]
+                                                      self._device)) for i in range(environment_threads)]
             for x in threads:
                 x.start()
             for x in threads:
@@ -318,10 +343,11 @@ class PPO(RlAlgorithm):
                 _make_gif(rollouts[0], os.path.join(self._gif_path, gif_name + '%d.gif' % e))
 
             # Update the policy
-            experience_dataset = ExperienceDataset(rollouts, ('state', 'action_data', 'action', 'reward', 'return'))
+            experience_dataset = ExperienceDataset(rollouts, self._backup_n, self._gamma)
             data_loader = DataLoader(experience_dataset, num_workers=data_loader_threads, batch_size=batch_size,
                                      shuffle=True,
-                                     pin_memory=True)
+                                     pin_memory=True,
+                                     drop_last=True)
             avg_policy_loss = 0
             avg_val_loss = 0
             avg_entropy_loss = 0
@@ -329,17 +355,28 @@ class PPO(RlAlgorithm):
                 avg_policy_loss = 0
                 avg_val_loss = 0
                 avg_entropy_loss = 0
-                for state, old_action_dist, old_action, reward, ret in data_loader:
-                    state = _prepare_tensor_batch(state, self._device) - 0.5
+                for exp in data_loader:
+                    if self._backup_n == float('inf'):
+                        state, old_action_dist, old_action, ret, terminal = exp
+                        s_prime = None
+                    else:
+                        state, old_action_dist, old_action, ret, s_prime, terminal, discount = exp
+                        s_prime = _prepare_tensor_batch(s_prime, self._device)
+                        discount = _prepare_tensor_batch(discount, self._device).unsqueeze(1)
+
+                    state = _prepare_tensor_batch(state, self._device)
                     old_action_dist = _prepare_tensor_batch(old_action_dist, self._device)
                     old_action = _prepare_tensor_batch(old_action, self._device)
                     ret = _prepare_tensor_batch(ret, self._device).unsqueeze(1)
+                    terminal = _prepare_tensor_batch(terminal, self._device).unsqueeze(1)
 
                     self._optimizer.zero_grad()
 
                     # If there is an embedding net, carry out the embedding
                     if self._embedding_network:
                         state = self._embedding_network(state)
+                        if s_prime is not None:
+                            s_prime = self._embedding_network(s_prime).detach()
 
                     # Calculate the ratio term
                     current_action_dist = self._policy_network(state)
@@ -349,16 +386,22 @@ class PPO(RlAlgorithm):
 
                     # Calculate the value loss
                     expected_returns = self._value_network(state)
-                    val_loss = self._value_criteria(expected_returns, ret)
+                    if s_prime is None:
+                        val_loss = self._value_criteria(expected_returns, ret)
+                        target = ret
+                    else:
+                        target = ret + discount * self._value_target_network(s_prime).detach()
+                        target = (1 - terminal) * target
+                        val_loss = self._value_criteria(expected_returns, target)
 
                     # Calculate the policy loss
-                    advantage = ret - expected_returns.detach()
+                    advantage = target - expected_returns.detach()
                     lhs = ratio * advantage
                     rhs = torch.clamp(ratio, self._ppo_lower_bound, self._ppo_upper_bound) * advantage
                     policy_loss = -torch.mean(torch.min(lhs, rhs))
 
                     # Calculate the entropy loss
-                    entropy_loss = -0.1 * torch.mean(_discrete_entropy(current_action_dist))
+                    entropy_loss = -self._entropy_coefficient * torch.mean(_discrete_entropy(current_action_dist))
 
                     # For logging
                     avg_val_loss += val_loss.item()
@@ -382,17 +425,16 @@ class PPO(RlAlgorithm):
             loop.update(1)
 
 
-def _calculate_returns(trajectory, gamma):
-    current_return = 0
-    for i in reversed(range(len(trajectory))):
-        current_exp = trajectory[i]
-        current_return = current_exp['reward'] + gamma * current_return
-        current_exp['return'] = current_return
+# def _calculate_returns(trajectory, gamma):
+#     current_return = 0
+#     for i in reversed(range(len(trajectory))):
+#         current_exp = trajectory[i]
+#         current_return = current_exp['reward'] + gamma * current_return
+#         current_exp['return'] = current_return
 
 
 def _run_envs(env, embedding_net, policy, action_selection_fn, experience_queue, reward_queue, num_rollouts,
-              max_episode_length,
-              gamma, device, calculate_returns=False):
+              max_episode_length, device):
     for _ in range(num_rollouts):
         current_rollout = []
         s = env.reset()
@@ -402,14 +444,17 @@ def _run_envs(env, embedding_net, policy, action_selection_fn, experience_queue,
             if embedding_net:
                 input_state = embedding_net(input_state)
 
-            action_data = policy(input_state)
-            action = action_selection_fn(action_data)[0]  # Remove the batch dimension
+            action_dist = policy(input_state)
+            action = action_selection_fn(action_dist)[0]  # Remove the batch dimension
             s_prime, r, t = env.step(action)
+
+            if t:
+                r = 0
 
             current_exp = {
                 'state': s,
+                'action_dist': action_dist.cpu().detach().numpy()[0],
                 'action': action,
-                'action_data': action_data.cpu().detach().numpy()[0],
                 'reward': r,
                 'terminal': t
             }
@@ -419,8 +464,6 @@ def _run_envs(env, embedding_net, policy, action_selection_fn, experience_queue,
                 break
             s = s_prime
 
-        if calculate_returns:
-            _calculate_returns(current_rollout, gamma)
         experience_queue.put(current_rollout)
         reward_queue.put(episode_reward)
 
@@ -449,7 +492,7 @@ def _prepare_tensor_batch(tensor, device):
 def _make_gif(rollout, filename):
     with imageio.get_writer(filename, mode='I', duration=1 / 30) as writer:
         for x in rollout:
-            writer.append_data((x['state'][:, :, 0] * 255).astype(np.uint8))
+            writer.append_data(((x['state'][:, :, 0] + 0.5) * 255).astype(np.uint8))
 
 
 def _discrete_entropy(array):

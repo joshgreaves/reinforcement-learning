@@ -3,16 +3,16 @@ import numpy as np
 import holodeck
 from holodeck.sensors import Sensors
 
-from rl import EnvironmentFactory
-from rl import RLEnvironment
+from . import EnvironmentFactory, RLEnvironment
 
 
 class MazeWorldEnvironmentFactory(EnvironmentFactory):
-    def __init__(self):
+    def __init__(self, res=(128, 128)):
         super(MazeWorldEnvironmentFactory, self).__init__()
+        self._res = res
 
     def new(self):
-        return MazeWorldEnvironment()
+        return MazeWorldEnvironment(res=self._res)
 
 
 class MazeWorldEnvironment(RLEnvironment):
